@@ -51,12 +51,12 @@ contract RoycoVaultMakinaStrategy is BaseStrategy {
         external
         initializer
     {
-        // Ensure that the vault and machine's base assets are identical
-        address roycoVaultAsset = IERC4626(_roycoVault).asset();
-        require(roycoVaultAsset == IMachine(_makinaMachine).accountingToken(), VAULT_AND_MACHINE_ASSET_MISMATCH());
-
         // Initialize the base strategy state
         _initializeBaseStrategy(_admin, _roycoVault);
+
+        // Ensure that the vault and machine's base assets are identical
+        address roycoVaultAsset = BaseStrategyStorage.fetch().asset;
+        require(roycoVaultAsset == IMachine(_makinaMachine).accountingToken(), VAULT_AND_MACHINE_ASSET_MISMATCH());
 
         // Initialize the strategy specfic state
         RoycoVaultMakinaStrategyState storage $ = _getRoycoVaultMakinaStrategyStorage();
@@ -141,7 +141,8 @@ contract RoycoVaultMakinaStrategy is BaseStrategy {
         // Compute the shares equivalent to the value of the assets to withdraw
         uint256 sharesToRedeem = makinaMachine.convertToShares(_assetsToWithdraw);
         // Redeem the shares from the Makina machine, withdrawing the assets to this strategy contract
-        return makinaMachine.redeem(sharesToRedeem, address(this), _assetsToWithdraw);
+        // NOTE: We set min amount out to 0 in order to preclude any rounding related reversions
+        return makinaMachine.redeem(sharesToRedeem, address(this), 0);
     }
 
     /**
