@@ -140,7 +140,7 @@ contract RoycoVaultMakinaStrategy is BaseStrategy {
         IMachine makinaMachine = IMachine(_getRoycoVaultMakinaStrategyStorage().makinaMachine);
         // Compute the shares equivalent to the value of the assets to withdraw
         uint256 sharesToRedeem = makinaMachine.convertToShares(_assetsToWithdraw);
-        // Redeem the shares from the Makina machine, withdrawing the assets to the strategy contract
+        // Redeem the shares from the Makina machine, withdrawing the assets to this strategy contract
         return makinaMachine.redeem(sharesToRedeem, address(this), _assetsToWithdraw);
     }
 
