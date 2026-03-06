@@ -37,6 +37,9 @@ contract RoycoVaultMakinaStrategy is BaseStrategy {
     /// @dev Thrown when the allocation params are not exactly 64 bytes (amount to allocate and minimum shares out)
     error INVALID_ALLOCATION_PARAMS();
 
+    /// @dev Thrown when the deallocation params are not exactly 32 bytes (amount to deallocate)
+    error INVALID_DEALLOCATION_PARAMS();
+
     /**
      * @notice Initializes the Royco Vault's Makina Machine Strategy
      * @param _admin The designated admin for this strategy
@@ -87,29 +90,59 @@ contract RoycoVaultMakinaStrategy is BaseStrategy {
     function _allocateToPosition(bytes calldata _allocationParams)
         internal
         override(BaseStrategy)
-        returns (uint256 amountToAllocate)
+        returns (uint256 assetsToAllocate)
     {
         // Validate and parse the allocation params to get the amount of assets to allocate and minimum shares to be minted in return
         require(_allocationParams.length == 64, INVALID_ALLOCATION_PARAMS());
         uint256 minSharesOut;
         assembly {
-            amountToAllocate := calldataload(_allocationParams.offset)
+            assetsToAllocate := calldataload(_allocationParams.offset)
             minSharesOut := calldataload(add(_allocationParams.offset, 0x20))
         }
 
         // Deposit the specified assets into the Makina machine
         // NOTE: Approval for the machine to pull assets was given on initialization
         IMachine(_getRoycoVaultMakinaStrategyStorage().makinaMachine)
-            .deposit(amountToAllocate, address(this), minSharesOut, bytes32(0));
+            .deposit(assetsToAllocate, address(this), minSharesOut, bytes32(0));
     }
 
     /// @inheritdoc BaseStrategy
     /// @dev This strategy contract must be configured as the redeemer for the machine
-    function _deallocateFromPosition(bytes calldata data) internal override(BaseStrategy) returns (uint256) {}
+    function _deallocateFromPosition(bytes calldata _deallocationParams)
+        internal
+        override(BaseStrategy)
+        returns (uint256)
+    {
+        // Validate and parse the deallocation params to get the amount of assets to deallocate
+        require(_deallocationParams.length == 32, INVALID_DEALLOCATION_PARAMS());
+        uint256 assetsToDeallocate;
+        assembly {
+            assetsToDeallocate := calldataload(_deallocationParams.offset)
+        }
+
+        // Withdraw the specified assets from the machine
+        return _withdrawAssetsFromMachine(assetsToDeallocate);
+    }
 
     /// @inheritdoc BaseStrategy
     /// @dev This strategy contract must be configured as the redeemer for the machine
-    function _withdrawFromPosition(uint256 assets) internal override(BaseStrategy) returns (uint256) {}
+    function _withdrawFromPosition(uint256 _assets) internal override(BaseStrategy) returns (uint256) {
+        // Withdraw the specified assets from the machine
+        return _withdrawAssetsFromMachine(_assets);
+    }
+
+    /**
+     * @dev Internal helper which withdraws strategy owned assets from the Makina machine
+     * @param _assetsToWithdraw The amount of assets to withdraw from the Makina machine
+     * @return assetsWithdrawn The amount of assets withdrawn from the Makina machine
+     */
+    function _withdrawAssetsFromMachine(uint256 _assetsToWithdraw) internal returns (uint256 assetsWithdrawn) {
+        IMachine makinaMachine = IMachine(_getRoycoVaultMakinaStrategyStorage().makinaMachine);
+        // Compute the shares equivalent to the value of the assets to withdraw
+        uint256 sharesToRedeem = makinaMachine.convertToShares(_assetsToWithdraw);
+        // Redeem the shares from the Makina machine, withdrawing the assets to the strategy contract
+        return makinaMachine.redeem(sharesToRedeem, address(this), _assetsToWithdraw);
+    }
 
     /**
      * @notice Returns a storage pointer to the state of the Royco Vault's Makina Machine Strategy
