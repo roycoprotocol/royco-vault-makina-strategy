@@ -127,7 +127,7 @@ contract RoycoVaultMakinaStrategy is BaseStrategy {
         // Validate and parse the allocation params to get the amount of assets to allocate and minimum shares to be minted in return
         require(_allocationParams.length == 64, INVALID_ALLOCATION_PARAMS());
         uint256 minSharesOut;
-        assembly {
+        assembly ("memory-safe") {
             assetsToAllocate := calldataload(_allocationParams.offset)
             minSharesOut := calldataload(add(_allocationParams.offset, 0x20))
         }
@@ -148,7 +148,7 @@ contract RoycoVaultMakinaStrategy is BaseStrategy {
         // Validate and parse the deallocation params to get the amount of assets to deallocate
         require(_deallocationParams.length == 32, INVALID_DEALLOCATION_PARAMS());
         uint256 assetsToDeallocate;
-        assembly {
+        assembly ("memory-safe") {
             assetsToDeallocate := calldataload(_deallocationParams.offset)
         }
 
