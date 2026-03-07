@@ -7,14 +7,15 @@ import {IERC20, SafeERC20} from "../lib/openzeppelin-contracts/contracts/token/E
 import {IERC4626} from "../lib/openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 import {AccessManaged} from "../lib/openzeppelin-contracts/contracts/access/manager/AccessManaged.sol";
 import {Math} from "../lib/openzeppelin-contracts/contracts/utils/math/Math.sol";
+import {Pausable} from "../lib/openzeppelin-contracts/contracts/utils/Pausable.sol";
 
 /**
  * @title RoycoVaultMakinaStrategy
  * @author Shivaansh Kapoor, Ankur Dubey
  * @notice A strategy contract for Royco vaults, enabling them to allocate assets into Makina machines
- * @dev This strategy must be configured as the designated depositor and redeemer on the underlying Makina machine
+ * @dev This strategy must be configured as the designated depositor and redeemer of the underlying Makina machine
  */
-contract RoycoVaultMakinaStrategy is AccessManaged, IStrategyTemplate {
+contract RoycoVaultMakinaStrategy is AccessManaged, Pausable, IStrategyTemplate {
     using SafeERC20 for IERC20;
 
     /// @notice The Royco vault that this strategy is configured for
@@ -88,11 +89,15 @@ contract RoycoVaultMakinaStrategy is AccessManaged, IStrategyTemplate {
         IERC20(ASSET).forceApprove(_makinaMachine, type(uint256).max);
     }
 
-    /// @inheritdoc IStrategyTemplate
-    /// @dev This strategy must be configured as the depositor for the machine
+    /**
+     * @inheritdoc IStrategyTemplate
+     * @dev This strategy must be configured as the depositor for the machine
+     * @dev Cannot be called when this strategy is paused
+     */
     function allocateFunds(bytes calldata _allocationParams)
         external
         override(IStrategyTemplate)
+        whenNotPaused
         onlyRoycoVault
         returns (uint256 amountAllocated)
     {
@@ -114,11 +119,15 @@ contract RoycoVaultMakinaStrategy is AccessManaged, IStrategyTemplate {
         emit AllocateFunds(amountAllocated);
     }
 
-    /// @inheritdoc IStrategyTemplate
-    /// @dev This strategy must be configured as the redeemer for the machine
+    /**
+     * @inheritdoc IStrategyTemplate
+     * @dev This strategy must be configured as the redeemer for the machine
+     * @dev Cannot be called when this strategy is paused
+     */
     function deallocateFunds(bytes calldata _deallocationParams)
         external
         override(IStrategyTemplate)
+        whenNotPaused
         onlyRoycoVault
         returns (uint256 amountDeallocated)
     {
@@ -134,11 +143,15 @@ contract RoycoVaultMakinaStrategy is AccessManaged, IStrategyTemplate {
         emit DeallocateFunds(amountDeallocated);
     }
 
-    /// @inheritdoc IStrategyTemplate
-    /// @dev This strategy must be configured as the redeemer for the machine
+    /**
+     * @inheritdoc IStrategyTemplate
+     * @dev This strategy must be configured as the redeemer for the machine
+     * @dev Cannot be called when this strategy is paused
+     */
     function onWithdraw(uint256 _amountToWithdraw)
         external
         override(IStrategyTemplate)
+        whenNotPaused
         onlyRoycoVault
         returns (uint256 amountWithdrawn)
     {
@@ -147,8 +160,11 @@ contract RoycoVaultMakinaStrategy is AccessManaged, IStrategyTemplate {
         emit StrategyWithdraw(amountWithdrawn);
     }
 
-    /// @inheritdoc IStrategyTemplate
-    /// @dev Only callable by a designated admin assigned by the Royco access manager
+    /**
+     * @inheritdoc IStrategyTemplate
+     * @dev Only callable by a designated admin assigned by the Royco access manager
+     * @dev Can be called when this strategy is paused
+     */
     function rescueToken(address _token, uint256 _amount) external override(IStrategyTemplate) restricted {
         // Ensure that the token to rescue is not the base asset
         require(_token != ASSET, INVALID_TOKEN_TO_RESCUE());
@@ -221,5 +237,17 @@ contract RoycoVaultMakinaStrategy is AccessManaged, IStrategyTemplate {
         uint256 sharesToRedeem = IMachine(MAKINA_MACHINE).convertToShares(_amountToWithdraw);
         // Redeem the shares from the Makina machine, withdrawing the assets directly to the Royco vault
         assetsWithdrawn = IMachine(MAKINA_MACHINE).redeem(sharesToRedeem, ROYCO_VAULT, 0);
+    }
+
+    /// @notice Pauses the strategy, disabling allocations and deallocations
+    /// @dev Only callable by a designated admin assigned by the Royco access manager
+    function pause() external restricted {
+        _pause();
+    }
+
+    /// @notice Unpauses the strategy, enabling allocations and deallocations
+    /// @dev Only callable by a designated admin assigned by the Royco access manager
+    function unpause() external restricted {
+        _unpause();
     }
 }
