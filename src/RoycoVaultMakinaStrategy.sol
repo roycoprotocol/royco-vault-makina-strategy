@@ -86,7 +86,7 @@ contract RoycoVaultMakinaStrategy is BaseStrategy {
     }
 
     /// @dev Should be used as the canonical version of `maxAllocation()` for this strategy
-    /// @dev Returns the max depositable assets into this strategy
+    /// @dev Returns the max assets depositable into this strategy
     function maxDeposit() external view returns (uint256) {
         IMachine machine = IMachine(_getRoycoVaultMakinaStrategyStorage().makinaMachine);
         // Return the asset value of the maximum mintable shares
@@ -133,7 +133,7 @@ contract RoycoVaultMakinaStrategy is BaseStrategy {
         }
 
         // Deposit the specified assets into the Makina machine
-        // NOTE: Approval for the machine to pull assets was given on initialization
+        // NOTE: Approval for the machine to pull assets was granted on initialization
         IMachine(_getRoycoVaultMakinaStrategyStorage().makinaMachine)
             .deposit(assetsToAllocate, address(this), minSharesOut, bytes32(0));
     }
