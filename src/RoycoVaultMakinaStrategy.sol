@@ -84,9 +84,6 @@ contract RoycoVaultMakinaStrategy is AccessManaged, Pausable, IStrategyTemplate 
         MAKINA_MACHINE = _makinaMachine;
         MACHINE_SHARE_TOKEN = IMachine(_makinaMachine).shareToken();
         STRATEGY_TYPE = _strategyType;
-
-        // Extend a one-time maximum approval to the machine for pulling assets on deposit
-        IERC20(ASSET).forceApprove(_makinaMachine, type(uint256).max);
     }
 
     /**
@@ -113,7 +110,7 @@ contract RoycoVaultMakinaStrategy is AccessManaged, Pausable, IStrategyTemplate 
         IERC20(ASSET).safeTransferFrom(ROYCO_VAULT, address(this), amountAllocated);
 
         // Deposit the specified assets into the Makina machine, minting the shares to this strategy
-        // NOTE: Approval for the machine to pull assets was granted on construction
+        IERC20(ASSET).forceApprove(MAKINA_MACHINE, amountAllocated);
         IMachine(MAKINA_MACHINE).deposit(amountAllocated, address(this), minSharesOut, bytes32(0));
 
         emit AllocateFunds(amountAllocated);
@@ -158,9 +155,10 @@ contract RoycoVaultMakinaStrategy is AccessManaged, Pausable, IStrategyTemplate 
         onlyRoycoVault
         returns (uint256 amountWithdrawn)
     {
-        // Withdraw the specified assets from the machine directly to the Royco Vault
         // Compute the shares equivalent to the value of the amount of assets to withdraw
-        uint256 sharesToRedeem = IMachine(MAKINA_MACHINE).convertToShares(_amountToWithdraw);
+        // NOTE: The conversion rounds down, so we pad it by 1 share to ensure that the requested amount to withdraw is always fulfilled
+        uint256 sharesToRedeem = IMachine(MAKINA_MACHINE).convertToShares(_amountToWithdraw) + 1;
+        sharesToRedeem = Math.min(sharesToRedeem, _getStrategyOwnedShares());
         // Redeem the shares from the Makina machine, withdrawing the assets directly to the Royco vault
         amountWithdrawn = IMachine(MAKINA_MACHINE).redeem(sharesToRedeem, ROYCO_VAULT, 0);
         emit StrategyWithdraw(amountWithdrawn);
@@ -226,11 +224,14 @@ contract RoycoVaultMakinaStrategy is AccessManaged, Pausable, IStrategyTemplate 
 
     /// @dev Internal helper which retrieves the current value of the strategy's position in base assets
     function _getStrategyOwnedAssets() internal view returns (uint256) {
-        // Get the machine shares owned by this strategy
-        uint256 strategyOwnedShares = IERC20(MACHINE_SHARE_TOKEN).balanceOf(address(this));
         // Return the value of the shares owned by this strategy in the machine's accounting asset
         // NOTE: The accounting asset is guaranteed to be identical to the Royco vault's base asset
-        return IMachine(MAKINA_MACHINE).convertToAssets(strategyOwnedShares);
+        return IMachine(MAKINA_MACHINE).convertToAssets(_getStrategyOwnedShares());
+    }
+
+    /// @dev Internal helper which retrieves the Makina machine shares owned by this strategy
+    function _getStrategyOwnedShares() internal view returns (uint256) {
+        return IERC20(MACHINE_SHARE_TOKEN).balanceOf(address(this));
     }
 
     /// @notice Pauses the strategy, disabling allocations and deallocations
