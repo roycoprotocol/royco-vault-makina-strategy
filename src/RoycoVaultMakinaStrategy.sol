@@ -57,7 +57,7 @@ contract RoycoVaultMakinaStrategy is AccessManaged, Pausable, IStrategyTemplate 
     /// @dev Thrown when the deallocation params are not exactly 64 bytes (shares to redeem and minimum assets out)
     error INVALID_DEALLOCATION_PARAMS();
 
-    /// @dev Thrown when the token being rescued is the base asset
+    /// @dev Thrown when the token being rescued is the base asset or the machine share token
     error INVALID_TOKEN_TO_RESCUE();
 
     /// @dev Modifier to permission a function to only be callable by the Royco vault
@@ -170,8 +170,8 @@ contract RoycoVaultMakinaStrategy is AccessManaged, Pausable, IStrategyTemplate 
      * @dev Can be called when this strategy is paused
      */
     function rescueToken(address _token, uint256 _amount) external override(IStrategyTemplate) restricted {
-        // Ensure that the token to rescue is not the base asset
-        require(_token != ASSET, INVALID_TOKEN_TO_RESCUE());
+        // Ensure that the token to rescue is not the base asset or the machine share token
+        require(_token != ASSET && _token != MACHINE_SHARE_TOKEN, INVALID_TOKEN_TO_RESCUE());
 
         // Rescue the specified amount of tokens, remitting them back to the caller
         // An amount of 0 is interpreted as the entire token balance of this strategy
