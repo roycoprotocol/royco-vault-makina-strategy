@@ -810,6 +810,157 @@ abstract contract StrategyTest is TestBase {
     }
 
     // =========================================
+    // SLIPPAGE PROTECTION TESTS
+    // =========================================
+
+    function test_allocateFunds_reverts_whenSlippageExceeded() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+
+        // Calculate expected shares and request more
+        uint256 expectedShares = MAKINA_MACHINE.convertToShares(amount);
+        uint256 unreasonableMinShares = expectedShares + 1e18; // Request way more shares than possible
+
+        bytes memory params = _encodeAllocationParams(amount, unreasonableMinShares);
+
+        vm.prank(address(ROYCO_VAULT));
+        vm.expectRevert(); // Machine reverts with SlippageProtection
+        STRATEGY.allocateFunds(params);
+    }
+
+    function test_deallocateFunds_reverts_whenSlippageExceeded() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+        _allocateToStrategy(amount, MIN_SHARES_OUT);
+
+        uint256 shares = _getStrategyShares();
+        _dealAssetToMachine(amount);
+
+        // Calculate expected assets and request more
+        uint256 expectedAssets = MAKINA_MACHINE.convertToAssets(shares);
+        uint256 unreasonableMinAssets = expectedAssets + 1e18; // Request way more assets than possible
+
+        bytes memory params = _encodeDeallocationParams(shares, unreasonableMinAssets);
+
+        vm.prank(address(ROYCO_VAULT));
+        vm.expectRevert(); // Machine reverts with SlippageProtection
+        STRATEGY.deallocateFunds(params);
+    }
+
+    function test_onWithdraw_reverts_whenMachineSlippageNotMet() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+        _allocateToStrategy(amount, MIN_SHARES_OUT);
+
+        // Don't deal enough assets to Machine - it won't have liquidity
+        // The Machine's redeem will revert with ExceededMaxWithdraw
+
+        vm.prank(address(ROYCO_VAULT));
+        vm.expectRevert(); // Machine reverts due to insufficient liquidity
+        STRATEGY.onWithdraw(amount);
+    }
+
+    function test_allocateFunds_succeeds_withExactSlippage() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+
+        // Calculate exact expected shares - this should work
+        uint256 expectedShares = MAKINA_MACHINE.convertToShares(amount);
+
+        bytes memory params = _encodeAllocationParams(amount, expectedShares);
+
+        vm.prank(address(ROYCO_VAULT));
+        STRATEGY.allocateFunds(params);
+
+        assertEq(_getStrategyShares(), expectedShares, "Should have exact shares");
+    }
+
+    function test_deallocateFunds_succeeds_withExactSlippage() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+        _allocateToStrategy(amount, MIN_SHARES_OUT);
+
+        uint256 shares = _getStrategyShares();
+        _dealAssetToMachine(amount * 2); // Ensure liquidity
+
+        // Calculate exact expected assets - this should work
+        uint256 expectedAssets = MAKINA_MACHINE.convertToAssets(shares);
+
+        bytes memory params = _encodeDeallocationParams(shares, expectedAssets);
+
+        uint256 vaultBalBefore = ASSET.balanceOf(address(ROYCO_VAULT));
+
+        vm.prank(address(ROYCO_VAULT));
+        STRATEGY.deallocateFunds(params);
+
+        assertEq(ASSET.balanceOf(address(ROYCO_VAULT)) - vaultBalBefore, expectedAssets, "Should receive exact assets");
+    }
+
+    // =========================================
+    // MACHINE CAPACITY TESTS
+    // =========================================
+
+    function test_allocateFunds_reverts_whenMachineAtShareLimit() public {
+        // Get max allocation from strategy
+        uint256 maxAlloc = STRATEGY.maxAllocation();
+
+        // Try to allocate more than max
+        uint256 excessAmount = maxAlloc + ALLOCATION_AMOUNT;
+        _setupAllocationScenario(excessAmount);
+
+        bytes memory params = _encodeAllocationParams(excessAmount, 0);
+
+        vm.prank(address(ROYCO_VAULT));
+        vm.expectRevert(); // Machine reverts with ExceededMaxMint
+        STRATEGY.allocateFunds(params);
+    }
+
+    function test_maxAllocation_reflectsMachineShareLimit() public view {
+        uint256 maxAlloc = STRATEGY.maxAllocation();
+        uint256 maxMint = MAKINA_MACHINE.maxMint();
+
+        if (maxMint == type(uint256).max) {
+            assertEq(maxAlloc, type(uint256).max, "Should return max uint256 when unlimited");
+        } else {
+            // maxAllocation should be the asset equivalent of maxMint
+            uint256 expectedMaxAlloc = MAKINA_MACHINE.convertToAssets(maxMint);
+            assertEq(maxAlloc, expectedMaxAlloc, "Should match converted max mint");
+        }
+    }
+
+    function test_maxWithdraw_reflectsMachineLiquidity() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+        _allocateToStrategy(amount, MIN_SHARES_OUT);
+
+        // Without dealing assets to machine, maxWithdraw should be limited
+        uint256 strategyValue = STRATEGY.totalAllocatedValue();
+        uint256 machineLiquidity = MAKINA_MACHINE.maxWithdraw();
+        uint256 maxWithdraw = STRATEGY.maxWithdraw();
+
+        // maxWithdraw should be min of strategy value and machine liquidity
+        assertEq(maxWithdraw, strategyValue < machineLiquidity ? strategyValue : machineLiquidity, "Should be min of value and liquidity");
+    }
+
+    function test_onWithdraw_handlesPartialLiquidity() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+        _allocateToStrategy(amount, MIN_SHARES_OUT);
+
+        // Deal only partial liquidity to machine
+        uint256 partialLiquidity = amount / 2;
+        _dealAssetToMachine(partialLiquidity);
+
+        uint256 maxWithdraw = STRATEGY.maxWithdraw();
+
+        // Should be able to withdraw up to maxWithdraw
+        vm.prank(address(ROYCO_VAULT));
+        uint256 withdrawn = STRATEGY.onWithdraw(maxWithdraw);
+
+        assertGe(withdrawn, maxWithdraw, "Should withdraw at least maxWithdraw");
+    }
+
+    // =========================================
     // ADVERSARIAL TESTS
     // =========================================
 

@@ -3,13 +3,13 @@ src = "src"
 out = "out"
 libs = ["lib"]
 optimizer = true
-optimizer_runs = 3000
+optimizer_runs = 10000
 bytecode_hash = "none"
 cbor_metadata = false
 sparse_mode = false
 build_info = true
 evm_version = "prague"
-via_ir = true
+via_ir = false
 deny = "never"
 fs_permissions = [{ access = "read", path = "./out" }]
 solc_version = "0.8.28"
