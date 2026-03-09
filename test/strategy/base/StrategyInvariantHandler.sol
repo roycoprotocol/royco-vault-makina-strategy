@@ -8,6 +8,7 @@ import { Test } from "lib/forge-std/src/Test.sol";
 import { IMachine } from "lib/makina-core/src/interfaces/IMachine.sol";
 import { IAccessControlEnumerable } from "lib/openzeppelin-contracts/contracts/access/extensions/IAccessControlEnumerable.sol";
 import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import { IERC20Metadata } from "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { RoycoVaultMakinaStrategy } from "src/RoycoVaultMakinaStrategy.sol";
 
 /// @title StrategyInvariantHandler
@@ -23,10 +24,15 @@ contract StrategyInvariantHandler is Test {
     IERC20 public asset;
     IERC20 public machineShareToken;
 
-    // Ghost variables for tracking
+    // Ghost variables for tracking successful operations
     uint256 public ghost_allocateCallCount;
     uint256 public ghost_deallocateCallCount;
     uint256 public ghost_withdrawCallCount;
+
+    // Ghost variables for tracking failed operations
+    uint256 public ghost_allocateFailCount;
+    uint256 public ghost_deallocateFailCount;
+    uint256 public ghost_withdrawFailCount;
 
     // Invariant tracking: onWithdraw bounds
     uint256 public ghost_withdrawBoundsViolations;
@@ -37,9 +43,9 @@ contract StrategyInvariantHandler is Test {
     address public allocator;
     address public admin;
 
-    // Bounds
-    uint256 public constant MIN_AMOUNT = 1e18;
-    uint256 public constant MAX_AMOUNT = 1_000_000e18;
+    // Bounds (set dynamically based on asset decimals)
+    uint256 public MIN_AMOUNT;
+    uint256 public MAX_AMOUNT;
 
     // -----------------------------------------
     // Constructor
@@ -60,6 +66,11 @@ contract StrategyInvariantHandler is Test {
         machineShareToken = _machineShareToken;
         allocator = _allocator;
         admin = _admin;
+
+        // Set bounds based on asset decimals
+        uint8 decimals = IERC20Metadata(address(_asset)).decimals();
+        MIN_AMOUNT = 10 ** decimals; // 1 token
+        MAX_AMOUNT = 100_000_000 * (10 ** decimals); // 100M tokens
     }
 
     // -----------------------------------------
@@ -68,10 +79,13 @@ contract StrategyInvariantHandler is Test {
 
     /// @notice Allocate assets from vault to strategy
     function allocate(uint256 amount) external {
-        amount = bound(amount, MIN_AMOUNT, MAX_AMOUNT);
-
         // Skip if strategy is paused
         if (strategy.paused()) return;
+
+        // Bound by Machine's max allocation to avoid ExceededMaxMint errors
+        uint256 maxAlloc = strategy.maxAllocation();
+        if (maxAlloc < MIN_AMOUNT) return;
+        amount = bound(amount, MIN_AMOUNT, maxAlloc > MAX_AMOUNT ? MAX_AMOUNT : maxAlloc);
 
         // Setup: deal assets to vault and approve strategy
         deal(address(asset), address(vault), asset.balanceOf(address(vault)) + amount);
@@ -86,7 +100,7 @@ contract StrategyInvariantHandler is Test {
         try vault.allocate(abi.encode(params)) {
             ghost_allocateCallCount++;
         } catch {
-            // Allocation may fail due to machine constraints
+            ghost_allocateFailCount++;
         }
     }
 
@@ -115,7 +129,7 @@ contract StrategyInvariantHandler is Test {
         try vault.allocate(abi.encode(params)) {
             ghost_deallocateCallCount++;
         } catch {
-            // Deallocation may fail
+            ghost_deallocateFailCount++;
         }
     }
 
@@ -149,7 +163,7 @@ contract StrategyInvariantHandler is Test {
                 ghost_withdrawBoundsViolations++;
             }
         } catch {
-            // Withdraw may fail
+            ghost_withdrawFailCount++;
         }
     }
 
@@ -165,5 +179,15 @@ contract StrategyInvariantHandler is Test {
     /// @notice Returns true if no withdraw bounds violations occurred
     function checkWithdrawBounds() external view returns (bool) {
         return ghost_withdrawBoundsViolations == 0;
+    }
+
+    /// @notice Returns the total number of successful operations
+    function totalSuccessfulOps() external view returns (uint256) {
+        return ghost_allocateCallCount + ghost_deallocateCallCount + ghost_withdrawCallCount;
+    }
+
+    /// @notice Returns the total number of failed operations
+    function totalFailedOps() external view returns (uint256) {
+        return ghost_allocateFailCount + ghost_deallocateFailCount + ghost_withdrawFailCount;
     }
 }

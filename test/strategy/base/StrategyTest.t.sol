@@ -19,7 +19,9 @@ abstract contract StrategyTest is TestBase {
     // -----------------------------------------
     // Test Constants
     // -----------------------------------------
-    uint256 internal ALLOCATION_AMOUNT;
+    uint256 internal ALLOCATION_AMOUNT; // For unit tests - 1000 tokens
+    uint256 internal MIN_FUZZ_AMOUNT; // For fuzz tests - 1 token
+    uint256 internal MAX_FUZZ_AMOUNT; // For fuzz tests - 1M tokens
     uint256 internal constant MIN_SHARES_OUT = 0;
     uint256 internal constant MIN_ASSETS_OUT = 0;
 
@@ -36,9 +38,11 @@ abstract contract StrategyTest is TestBase {
         _setUpTestBase(_strategyName());
         _deployStrategy(_strategyName());
 
-        // Set allocation amount based on asset decimals (1000 tokens)
+        // Set test amounts based on asset decimals
         uint8 decimals = IERC20Metadata(address(ASSET)).decimals();
-        ALLOCATION_AMOUNT = 1000 * (10 ** decimals);
+        ALLOCATION_AMOUNT = 1_000_000 * (10 ** decimals); // 1M tokens for unit tests
+        MIN_FUZZ_AMOUNT = 10 ** decimals; // 1 token minimum for fuzz tests
+        MAX_FUZZ_AMOUNT = 100_000_000 * (10 ** decimals); // 100M tokens maximum for fuzz tests
     }
 
     // =========================================
@@ -594,8 +598,10 @@ abstract contract StrategyTest is TestBase {
     // =========================================
 
     function testFuzz_allocateFunds_variousAmounts(uint256 amount) public {
-        // Bound to reasonable amounts (1 to 1000 tokens in asset decimals)
-        amount = bound(amount, ALLOCATION_AMOUNT / 1000, ALLOCATION_AMOUNT);
+        // Bound by Machine's max allocation to avoid ExceededMaxMint errors
+        uint256 maxAlloc = STRATEGY.maxAllocation();
+        if (maxAlloc < MIN_FUZZ_AMOUNT) return; // Skip if machine can't accept minimum
+        amount = bound(amount, MIN_FUZZ_AMOUNT, maxAlloc > MAX_FUZZ_AMOUNT ? MAX_FUZZ_AMOUNT : maxAlloc);
         _setupAllocationScenario(amount);
 
         uint256 sharesBefore = _getStrategyShares();
@@ -619,7 +625,10 @@ abstract contract StrategyTest is TestBase {
     }
 
     function testFuzz_deallocateFunds_variousAmounts(uint256 amount) public {
-        amount = bound(amount, ALLOCATION_AMOUNT / 1000, ALLOCATION_AMOUNT);
+        // Bound by Machine's max allocation to avoid ExceededMaxMint errors
+        uint256 maxAlloc = STRATEGY.maxAllocation();
+        if (maxAlloc < MIN_FUZZ_AMOUNT) return; // Skip if machine can't accept minimum
+        amount = bound(amount, MIN_FUZZ_AMOUNT, maxAlloc > MAX_FUZZ_AMOUNT ? MAX_FUZZ_AMOUNT : maxAlloc);
         _setupAllocationScenario(amount);
         _allocateToStrategy(amount, MIN_SHARES_OUT);
 
@@ -644,8 +653,11 @@ abstract contract StrategyTest is TestBase {
         assertEq(ASSET.balanceOf(address(STRATEGY)), 0, "Strategy should hold no idle assets");
     }
 
-    function testFuzz_onWithdraw_variousAmounts(uint256 withdrawAmount) public {
-        uint256 allocAmount = ALLOCATION_AMOUNT;
+    function testFuzz_onWithdraw_variousAmounts(uint256 allocAmount, uint256 withdrawAmount) public {
+        // Bound by Machine's max allocation to avoid ExceededMaxMint errors
+        uint256 maxAlloc = STRATEGY.maxAllocation();
+        if (maxAlloc < MIN_FUZZ_AMOUNT) return; // Skip if machine can't accept minimum
+        allocAmount = bound(allocAmount, MIN_FUZZ_AMOUNT, maxAlloc > MAX_FUZZ_AMOUNT ? MAX_FUZZ_AMOUNT : maxAlloc);
 
         _setupAllocationScenario(allocAmount);
         _allocateToStrategy(allocAmount, MIN_SHARES_OUT);
@@ -653,7 +665,8 @@ abstract contract StrategyTest is TestBase {
 
         // Bound to maxWithdraw - this is how the vault uses onWithdraw (it checks maxWithdraw first)
         uint256 maxWithdrawable = STRATEGY.maxWithdraw();
-        withdrawAmount = bound(withdrawAmount, ALLOCATION_AMOUNT / 1000, maxWithdrawable);
+        if (maxWithdrawable < MIN_FUZZ_AMOUNT) return; // Skip if not enough to withdraw
+        withdrawAmount = bound(withdrawAmount, MIN_FUZZ_AMOUNT, maxWithdrawable);
 
         uint256 strategySharesBefore = _getStrategyShares();
         uint256 vaultBalBefore = ASSET.balanceOf(address(ROYCO_VAULT));
@@ -682,8 +695,7 @@ abstract contract StrategyTest is TestBase {
     }
 
     function testFuzz_rescueToken_variousAmounts(uint256 amount) public {
-        // Use asset's decimals for bounds
-        amount = bound(amount, 1, ALLOCATION_AMOUNT * 1000);
+        amount = bound(amount, MIN_FUZZ_AMOUNT, MAX_FUZZ_AMOUNT);
 
         address admin = _getAuthorizedAdmin();
 
@@ -887,6 +899,20 @@ abstract contract StrategyTest is TestBase {
     /// @notice Invariant: onWithdraw always returns within bounds [requested, requested + 1 share worth]
     function invariant_withdrawBounds() public view {
         assertTrue(handler.checkWithdrawBounds(), "onWithdraw must return within bounds");
+    }
+
+    /// @notice Invariant: Ensure sufficient test coverage - not all operations should fail
+    function invariant_sufficientCoverage() public view {
+        uint256 successOps = handler.totalSuccessfulOps();
+        uint256 failedOps = handler.totalFailedOps();
+        uint256 totalOps = successOps + failedOps;
+
+        // Only check coverage after enough operations have been attempted
+        if (totalOps >= 10) {
+            // At least 10% of operations should succeed for meaningful coverage
+            // If all operations fail, the other invariants pass vacuously
+            assertTrue(successOps * 10 >= totalOps, "Too many failed operations - invariants may pass vacuously");
+        }
     }
 
     // =========================================
