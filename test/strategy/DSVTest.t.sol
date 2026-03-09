@@ -17,7 +17,7 @@ contract DSVTest is StrategyTest {
     }
 
     function _strategyType() internal pure override returns (StrategyType) {
-        return StrategyType.ASYNC;
+        return StrategyType.CROSSCHAIN;
     }
 
     function _forkConfiguration() internal view override returns (uint256 forkBlock, string memory forkRpcUrl) {

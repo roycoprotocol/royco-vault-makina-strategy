@@ -58,7 +58,7 @@ abstract contract DeploymentConfig {
     function _initializeStrategyConfigs() internal {
         // TODO: Update with new Makina machine when deployed
         _strategyConfigs[ROYCO_DAWN_SENIOR_VAULT] = StrategyDeploymentConfig({
-            roycoFactory: ROYCO_FACTORY_ADDRESS, roycoVault: DSV, makinaMachine: DUSD_MAKINA_MACHINE, strategyType: StrategyType.ASYNC
+            roycoFactory: ROYCO_FACTORY_ADDRESS, roycoVault: DSV, makinaMachine: DUSD_MAKINA_MACHINE, strategyType: StrategyType.CROSSCHAIN
         });
     }
 }
