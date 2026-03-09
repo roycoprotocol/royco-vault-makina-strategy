@@ -92,9 +92,13 @@ contract StrategyInvariantHandler is Test {
         vm.prank(address(vault));
         asset.approve(address(strategy), type(uint256).max);
 
+        // Calculate expected shares and apply 1% slippage tolerance
+        uint256 expectedShares = machine.convertToShares(amount);
+        uint256 minSharesOut = expectedShares * 99 / 100; // 1% slippage tolerance
+
         // Perform allocation through vault
         IAllocateModule.AllocateParams[] memory params = new IAllocateModule.AllocateParams[](1);
-        params[0] = IAllocateModule.AllocateParams({ isDeposit: true, strategy: address(strategy), extraData: abi.encode(amount, uint256(0)) });
+        params[0] = IAllocateModule.AllocateParams({ isDeposit: true, strategy: address(strategy), extraData: abi.encode(amount, minSharesOut) });
 
         vm.prank(allocator);
         try vault.allocate(abi.encode(params)) {
@@ -121,9 +125,12 @@ contract StrategyInvariantHandler is Test {
         uint256 expectedAssets = machine.convertToAssets(sharesToRedeem);
         deal(address(asset), address(machine), asset.balanceOf(address(machine)) + expectedAssets);
 
+        // Apply 1% slippage tolerance
+        uint256 minAssetsOut = expectedAssets * 99 / 100;
+
         // Perform deallocation through vault
         IAllocateModule.AllocateParams[] memory params = new IAllocateModule.AllocateParams[](1);
-        params[0] = IAllocateModule.AllocateParams({ isDeposit: false, strategy: address(strategy), extraData: abi.encode(sharesToRedeem, uint256(0)) });
+        params[0] = IAllocateModule.AllocateParams({ isDeposit: false, strategy: address(strategy), extraData: abi.encode(sharesToRedeem, minAssetsOut) });
 
         vm.prank(allocator);
         try vault.allocate(abi.encode(params)) {

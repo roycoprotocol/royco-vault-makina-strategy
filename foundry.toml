@@ -9,7 +9,7 @@ cbor_metadata = false
 sparse_mode = false
 build_info = true
 evm_version = "prague"
-via_ir = false
+via_ir = true
 deny = "never"
 fs_permissions = [{ access = "read", path = "./out" }]
 solc_version = "0.8.28"

@@ -694,6 +694,55 @@ abstract contract StrategyTest is TestBase {
         assertEq(ASSET.balanceOf(address(STRATEGY)), 0, "Strategy should hold no idle assets");
     }
 
+    function testFuzz_allocateFunds_withSlippage(uint256 amount, uint256 slippageBps) public {
+        // Bound by Machine's max allocation
+        uint256 maxAlloc = STRATEGY.maxAllocation();
+        if (maxAlloc < MIN_FUZZ_AMOUNT) return;
+        amount = bound(amount, MIN_FUZZ_AMOUNT, maxAlloc > MAX_FUZZ_AMOUNT ? MAX_FUZZ_AMOUNT : maxAlloc);
+        slippageBps = bound(slippageBps, 0, 100); // 0-1% slippage tolerance
+
+        _setupAllocationScenario(amount);
+
+        uint256 expectedShares = MAKINA_MACHINE.convertToShares(amount);
+        // Apply slippage: minSharesOut = expectedShares * (100 - slippageBps) / 100
+        uint256 minSharesOut = expectedShares * (100 - slippageBps) / 100;
+
+        bytes memory params = _encodeAllocationParams(amount, minSharesOut);
+
+        vm.prank(address(ROYCO_VAULT));
+        STRATEGY.allocateFunds(params);
+
+        assertGe(_getStrategyShares(), minSharesOut, "Should receive at least minSharesOut");
+    }
+
+    function testFuzz_deallocateFunds_withSlippage(uint256 amount, uint256 slippageBps) public {
+        // Bound by Machine's max allocation
+        uint256 maxAlloc = STRATEGY.maxAllocation();
+        if (maxAlloc < MIN_FUZZ_AMOUNT) return;
+        amount = bound(amount, MIN_FUZZ_AMOUNT, maxAlloc > MAX_FUZZ_AMOUNT ? MAX_FUZZ_AMOUNT : maxAlloc);
+        slippageBps = bound(slippageBps, 0, 100); // 0-1% slippage tolerance
+
+        _setupAllocationScenario(amount);
+        _allocateToStrategy(amount, 0);
+
+        uint256 shares = _getStrategyShares();
+        _dealAssetToMachine(amount * 2); // Ensure liquidity
+
+        uint256 expectedAssets = MAKINA_MACHINE.convertToAssets(shares);
+        // Apply slippage: minAssetsOut = expectedAssets * (100 - slippageBps) / 100
+        uint256 minAssetsOut = expectedAssets * (100 - slippageBps) / 100;
+
+        bytes memory params = _encodeDeallocationParams(shares, minAssetsOut);
+
+        uint256 vaultBalBefore = ASSET.balanceOf(address(ROYCO_VAULT));
+
+        vm.prank(address(ROYCO_VAULT));
+        STRATEGY.deallocateFunds(params);
+
+        uint256 received = ASSET.balanceOf(address(ROYCO_VAULT)) - vaultBalBefore;
+        assertGe(received, minAssetsOut, "Should receive at least minAssetsOut");
+    }
+
     function testFuzz_rescueToken_variousAmounts(uint256 amount) public {
         amount = bound(amount, MIN_FUZZ_AMOUNT, MAX_FUZZ_AMOUNT);
 
