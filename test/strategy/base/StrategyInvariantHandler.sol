@@ -24,14 +24,14 @@ contract StrategyInvariantHandler is Test {
     IERC20 public machineShareToken;
 
     // Ghost variables for tracking
-    uint256 public ghost_totalAllocated;
-    uint256 public ghost_totalDeallocated;
-    uint256 public ghost_totalWithdrawn;
     uint256 public ghost_allocateCallCount;
     uint256 public ghost_deallocateCallCount;
     uint256 public ghost_withdrawCallCount;
-    uint256 public ghost_pauseCount;
-    uint256 public ghost_unpauseCount;
+
+    // Invariant tracking: onWithdraw bounds
+    uint256 public ghost_withdrawBoundsViolations;
+    uint256 public ghost_lastWithdrawRequested;
+    uint256 public ghost_lastWithdrawActual;
 
     // Actors
     address public allocator;
@@ -84,7 +84,6 @@ contract StrategyInvariantHandler is Test {
 
         vm.prank(allocator);
         try vault.allocate(abi.encode(params)) {
-            ghost_totalAllocated += amount;
             ghost_allocateCallCount++;
         } catch {
             // Allocation may fail due to machine constraints
@@ -114,7 +113,6 @@ contract StrategyInvariantHandler is Test {
 
         vm.prank(allocator);
         try vault.allocate(abi.encode(params)) {
-            ghost_totalDeallocated += expectedAssets;
             ghost_deallocateCallCount++;
         } catch {
             // Deallocation may fail
@@ -137,51 +135,35 @@ contract StrategyInvariantHandler is Test {
         // Ensure machine has liquidity
         deal(address(asset), address(machine), asset.balanceOf(address(machine)) + amount);
 
+        // Calculate max allowed overage (1 share worth)
+        uint256 maxOverage = machine.convertToAssets(1);
+
         vm.prank(address(vault));
         try strategy.onWithdraw(amount) returns (uint256 withdrawn) {
-            ghost_totalWithdrawn += withdrawn;
+            ghost_lastWithdrawRequested = amount;
+            ghost_lastWithdrawActual = withdrawn;
             ghost_withdrawCallCount++;
+
+            // Check bounds: requested <= withdrawn <= requested + 1 share worth
+            if (withdrawn < amount || withdrawn > amount + maxOverage) {
+                ghost_withdrawBoundsViolations++;
+            }
         } catch {
             // Withdraw may fail
         }
     }
 
-    /// @notice Pause the strategy
-    function pause() external {
-        if (strategy.paused()) return;
-
-        vm.prank(admin);
-        try strategy.pause() {
-            ghost_pauseCount++;
-        } catch { }
-    }
-
-    /// @notice Unpause the strategy
-    function unpause() external {
-        if (!strategy.paused()) return;
-
-        vm.prank(admin);
-        try strategy.unpause() {
-            ghost_unpauseCount++;
-        } catch { }
-    }
-
     // -----------------------------------------
-    // View Helpers for Invariants
+    // Invariant Checks
     // -----------------------------------------
 
-    /// @notice Get current strategy share balance
-    function getStrategyShares() external view returns (uint256) {
-        return machineShareToken.balanceOf(address(strategy));
+    /// @notice Returns true if no idle assets in strategy
+    function checkNoIdleAssets() external view returns (bool) {
+        return asset.balanceOf(address(strategy)) == 0;
     }
 
-    /// @notice Get current strategy asset value
-    function getStrategyValue() external view returns (uint256) {
-        return strategy.totalAllocatedValue();
-    }
-
-    /// @notice Check if strategy is paused
-    function isPaused() external view returns (bool) {
-        return strategy.paused();
+    /// @notice Returns true if no withdraw bounds violations occurred
+    function checkWithdrawBounds() external view returns (bool) {
+        return ghost_withdrawBoundsViolations == 0;
     }
 }

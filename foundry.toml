@@ -44,6 +44,10 @@ exclude_lints = ["mixed-case-function", "mixed-case-variable"]
 runs = 1000
 show_logs = true
 
+[invariant]
+runs = 64
+depth = 32
+fail_on_revert = false
 
 [etherscan]
 mainnet = { key = "${ETHERSCAN_API_KEY}" }

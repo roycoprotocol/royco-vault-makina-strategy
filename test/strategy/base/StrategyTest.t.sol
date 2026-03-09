@@ -2,8 +2,9 @@
 pragma solidity ^0.8.28;
 
 import { TestBase } from "../../base/TestBase.sol";
+import { StrategyInvariantHandler } from "./StrategyInvariantHandler.sol";
 import { StrategyType } from "lib/concrete-earn-v2-bug-bounty/src/interface/IStrategyTemplate.sol";
-import { Vm } from "lib/forge-std/src/Vm.sol";
+import { ConcreteV2RolesLib } from "lib/concrete-earn-v2-bug-bounty/src/lib/Roles.sol";
 import { IMachine } from "lib/makina-core/src/interfaces/IMachine.sol";
 import { IAccessManaged } from "lib/openzeppelin-contracts/contracts/access/manager/IAccessManaged.sol";
 import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
@@ -77,14 +78,39 @@ abstract contract StrategyTest is TestBase {
 
         uint256 vaultBalBefore = ASSET.balanceOf(address(ROYCO_VAULT));
         uint256 strategySharesBefore = _getStrategyShares();
+        uint256 strategyAssetBalBefore = ASSET.balanceOf(address(STRATEGY));
+        uint256 machineAssetBalBefore = ASSET.balanceOf(address(MAKINA_MACHINE));
+
+        // Calculate expected shares before allocation
+        uint256 expectedShares = MAKINA_MACHINE.convertToShares(amount);
 
         _allocateToStrategy(amount, MIN_SHARES_OUT);
 
         uint256 vaultBalAfter = ASSET.balanceOf(address(ROYCO_VAULT));
         uint256 strategySharesAfter = _getStrategyShares();
+        uint256 strategyAssetBalAfter = ASSET.balanceOf(address(STRATEGY));
+        uint256 machineAssetBalAfter = ASSET.balanceOf(address(MAKINA_MACHINE));
 
-        assertEq(vaultBalBefore - vaultBalAfter, amount, "Vault balance not decreased");
-        assertGt(strategySharesAfter, strategySharesBefore, "Strategy shares not increased");
+        // Exact vault balance decrease
+        assertEq(vaultBalBefore - vaultBalAfter, amount, "Vault balance should decrease by exact amount");
+        // Exact shares minted to strategy
+        assertEq(strategySharesAfter - strategySharesBefore, expectedShares, "Strategy should receive exact expected shares");
+        // Strategy should hold no idle assets (all transferred to machine)
+        assertEq(strategyAssetBalAfter, strategyAssetBalBefore, "Strategy should hold no idle assets");
+        // Machine should receive the exact amount
+        assertEq(machineAssetBalAfter - machineAssetBalBefore, amount, "Machine should receive exact amount");
+    }
+
+    function test_allocateFunds_returnsExactAmount() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+
+        bytes memory params = _encodeAllocationParams(amount, MIN_SHARES_OUT);
+        vm.prank(address(ROYCO_VAULT));
+        uint256 returnedAmount = STRATEGY.allocateFunds(params);
+
+        // Return value must exactly match the allocated amount
+        assertEq(returnedAmount, amount, "Return value should exactly match allocated amount");
     }
 
     function test_allocateFunds_emitsEvent() public {
@@ -155,12 +181,45 @@ abstract contract StrategyTest is TestBase {
         _dealAssetToMachine(amount); // Ensure machine has liquidity
 
         uint256 vaultBalBefore = ASSET.balanceOf(address(ROYCO_VAULT));
+        uint256 machineAssetBalBefore = ASSET.balanceOf(address(MAKINA_MACHINE));
+        uint256 strategyAssetBalBefore = ASSET.balanceOf(address(STRATEGY));
+
+        // Calculate expected assets before deallocation
+        uint256 expectedAssets = MAKINA_MACHINE.convertToAssets(sharesToRedeem);
 
         _deallocateFromStrategy(sharesToRedeem, MIN_ASSETS_OUT);
 
         uint256 vaultBalAfter = ASSET.balanceOf(address(ROYCO_VAULT));
-        assertGt(vaultBalAfter, vaultBalBefore, "Vault balance not increased");
-        assertEq(_getStrategyShares(), 0, "Strategy shares not zeroed");
+        uint256 machineAssetBalAfter = ASSET.balanceOf(address(MAKINA_MACHINE));
+        uint256 strategyAssetBalAfter = ASSET.balanceOf(address(STRATEGY));
+
+        // Exact vault balance increase
+        assertEq(vaultBalAfter - vaultBalBefore, expectedAssets, "Vault should receive exact expected assets");
+        // Strategy shares should be exactly zero
+        assertEq(_getStrategyShares(), 0, "Strategy shares should be exactly zero");
+        // Machine balance should decrease by exact amount
+        assertEq(machineAssetBalBefore - machineAssetBalAfter, expectedAssets, "Machine balance should decrease by exact amount");
+        // Strategy should hold no idle assets
+        assertEq(strategyAssetBalAfter, strategyAssetBalBefore, "Strategy should hold no idle assets");
+    }
+
+    function test_deallocateFunds_returnsExactAmount() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+        _allocateToStrategy(amount, MIN_SHARES_OUT);
+
+        uint256 sharesToRedeem = _getStrategyShares();
+        _dealAssetToMachine(amount);
+
+        // Calculate expected assets
+        uint256 expectedAssets = MAKINA_MACHINE.convertToAssets(sharesToRedeem);
+
+        bytes memory params = _encodeDeallocationParams(sharesToRedeem, MIN_ASSETS_OUT);
+        vm.prank(address(ROYCO_VAULT));
+        uint256 returnedAmount = STRATEGY.deallocateFunds(params);
+
+        // Return value must exactly match the deallocated amount
+        assertEq(returnedAmount, expectedAssets, "Return value should exactly match deallocated amount");
     }
 
     function test_deallocateFunds_emitsEvent() public {
@@ -171,21 +230,16 @@ abstract contract StrategyTest is TestBase {
         uint256 sharesToRedeem = _getStrategyShares();
         _dealAssetToMachine(amount);
 
-        // Record logs to verify event emission
-        vm.recordLogs();
-        _deallocateFromStrategy(sharesToRedeem, MIN_ASSETS_OUT);
+        // Calculate exact expected assets
+        uint256 expectedAssets = MAKINA_MACHINE.convertToAssets(sharesToRedeem);
 
-        Vm.Log[] memory entries = vm.getRecordedLogs();
-        bool foundEvent = false;
-        for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].topics[0] == keccak256("DeallocateFunds(uint256)")) {
-                foundEvent = true;
-                uint256 emittedAmount = abi.decode(entries[i].data, (uint256));
-                assertGt(emittedAmount, 0, "Deallocated amount should be > 0");
-                break;
-            }
-        }
-        assertTrue(foundEvent, "DeallocateFunds event not emitted");
+        // Expect exact event with exact amount
+        vm.expectEmit(true, true, true, true, address(STRATEGY));
+        emit RoycoVaultMakinaStrategy.DeallocateFunds(expectedAssets);
+
+        bytes memory params = _encodeDeallocationParams(sharesToRedeem, MIN_ASSETS_OUT);
+        vm.prank(address(ROYCO_VAULT));
+        STRATEGY.deallocateFunds(params);
     }
 
     function test_deallocateFunds_reverts_whenPaused() public {
@@ -248,14 +302,37 @@ abstract contract StrategyTest is TestBase {
         _dealAssetToMachine(amount);
 
         uint256 vaultBalBefore = ASSET.balanceOf(address(ROYCO_VAULT));
+        uint256 machineBalBefore = ASSET.balanceOf(address(MAKINA_MACHINE));
+        uint256 strategySharesBefore = _getStrategyShares();
+        uint256 strategyAssetBalBefore = ASSET.balanceOf(address(STRATEGY));
+
+        // Calculate exact expected shares to redeem (mirrors contract logic)
+        uint256 expectedSharesToRedeem = MAKINA_MACHINE.convertToShares(withdrawAmount) + 1;
+        expectedSharesToRedeem = expectedSharesToRedeem > strategySharesBefore ? strategySharesBefore : expectedSharesToRedeem;
+        uint256 expectedWithdrawn = MAKINA_MACHINE.convertToAssets(expectedSharesToRedeem);
 
         vm.prank(address(ROYCO_VAULT));
         uint256 withdrawn = STRATEGY.onWithdraw(withdrawAmount);
 
         uint256 vaultBalAfter = ASSET.balanceOf(address(ROYCO_VAULT));
+        uint256 machineBalAfter = ASSET.balanceOf(address(MAKINA_MACHINE));
+        uint256 strategySharesAfter = _getStrategyShares();
+        uint256 strategyAssetBalAfter = ASSET.balanceOf(address(STRATEGY));
 
-        assertGe(withdrawn, withdrawAmount, "Withdrew less than requested");
-        assertEq(vaultBalAfter - vaultBalBefore, withdrawn, "Balance delta mismatch");
+        // Exact return value verification
+        assertEq(withdrawn, expectedWithdrawn, "Return value should match expected withdrawn amount");
+        // Exact vault balance increase
+        assertEq(vaultBalAfter - vaultBalBefore, expectedWithdrawn, "Vault balance should increase by exact withdrawn amount");
+        // Exact machine balance decrease
+        assertEq(machineBalBefore - machineBalAfter, expectedWithdrawn, "Machine balance should decrease by exact withdrawn amount");
+        // Exact shares consumed
+        assertEq(strategySharesBefore - strategySharesAfter, expectedSharesToRedeem, "Exact shares should be consumed");
+        // Strategy should hold no idle assets
+        assertEq(strategyAssetBalAfter, strategyAssetBalBefore, "Strategy should hold no idle assets");
+        // Withdrawn should be >= requested (due to +1 padding)
+        assertGe(withdrawn, withdrawAmount, "Withdrawn should be at least requested amount");
+        // Overage should be bounded by 1 share worth (the +1 padding)
+        assertLe(withdrawn - withdrawAmount, MAKINA_MACHINE.convertToAssets(1), "Overage should be at most 1 share worth");
     }
 
     function test_onWithdraw_emitsEvent() public {
@@ -264,22 +341,20 @@ abstract contract StrategyTest is TestBase {
         _allocateToStrategy(amount, MIN_SHARES_OUT);
         _dealAssetToMachine(amount);
 
-        // Record logs to verify event emission
-        vm.recordLogs();
-        vm.prank(address(ROYCO_VAULT));
-        STRATEGY.onWithdraw(amount / 2);
+        uint256 withdrawAmount = amount / 2;
+        uint256 strategyShares = _getStrategyShares();
 
-        Vm.Log[] memory entries = vm.getRecordedLogs();
-        bool foundEvent = false;
-        for (uint256 i = 0; i < entries.length; i++) {
-            if (entries[i].topics[0] == keccak256("StrategyWithdraw(uint256)")) {
-                foundEvent = true;
-                uint256 emittedAmount = abi.decode(entries[i].data, (uint256));
-                assertGe(emittedAmount, amount / 2, "Withdrawn amount should be >= requested");
-                break;
-            }
-        }
-        assertTrue(foundEvent, "StrategyWithdraw event not emitted");
+        // Calculate exact expected withdrawn amount (mirrors contract logic)
+        uint256 expectedSharesToRedeem = MAKINA_MACHINE.convertToShares(withdrawAmount) + 1;
+        expectedSharesToRedeem = expectedSharesToRedeem > strategyShares ? strategyShares : expectedSharesToRedeem;
+        uint256 expectedWithdrawn = MAKINA_MACHINE.convertToAssets(expectedSharesToRedeem);
+
+        // Expect exact event with exact amount
+        vm.expectEmit(true, true, true, true, address(STRATEGY));
+        emit RoycoVaultMakinaStrategy.StrategyWithdraw(expectedWithdrawn);
+
+        vm.prank(address(ROYCO_VAULT));
+        STRATEGY.onWithdraw(withdrawAmount);
     }
 
     function test_onWithdraw_reverts_whenPaused() public {
@@ -457,11 +532,18 @@ abstract contract StrategyTest is TestBase {
     function test_totalAllocatedValue_returnsCorrectValue_afterAllocation() public {
         uint256 amount = ALLOCATION_AMOUNT;
         _setupAllocationScenario(amount);
+
+        // Calculate expected shares before allocation
+        uint256 expectedShares = MAKINA_MACHINE.convertToShares(amount);
+
         _allocateToStrategy(amount, MIN_SHARES_OUT);
 
+        // Calculate exact expected value from shares
+        uint256 expectedValue = MAKINA_MACHINE.convertToAssets(expectedShares);
+
         uint256 allocatedValue = STRATEGY.totalAllocatedValue();
-        // Allow 1% tolerance for exchange rate differences
-        assertApproxEqRel(allocatedValue, amount, 0.01e18, "Allocated value mismatch");
+        // Must match exactly - no tolerance
+        assertEq(allocatedValue, expectedValue, "Allocated value should match exactly");
     }
 
     function test_maxAllocation_returnsMaxUint256_whenMachineReturnsMaxUint256() public {
@@ -490,11 +572,21 @@ abstract contract StrategyTest is TestBase {
     function test_maxWithdraw_returnsCorrectValue_afterAllocation() public {
         uint256 amount = ALLOCATION_AMOUNT;
         _setupAllocationScenario(amount);
+
+        // Calculate expected shares before allocation
+        uint256 expectedShares = MAKINA_MACHINE.convertToShares(amount);
+
         _allocateToStrategy(amount, MIN_SHARES_OUT);
         _dealAssetToMachine(amount);
 
+        // Calculate exact expected max withdraw
+        // maxWithdraw = min(machine.maxWithdraw(), strategy.totalAllocatedValue())
+        uint256 machineMaxWithdraw = MAKINA_MACHINE.maxWithdraw();
+        uint256 strategyValue = MAKINA_MACHINE.convertToAssets(expectedShares);
+        uint256 expectedMaxWithdraw = machineMaxWithdraw < strategyValue ? machineMaxWithdraw : strategyValue;
+
         uint256 maxWithdrawable = STRATEGY.maxWithdraw();
-        assertGt(maxWithdrawable, 0, "Max withdraw should be > 0");
+        assertEq(maxWithdrawable, expectedMaxWithdraw, "Max withdraw should match exactly");
     }
 
     function test_asset_returnsCorrectAddress() public view {
@@ -523,10 +615,23 @@ abstract contract StrategyTest is TestBase {
         _setupAllocationScenario(amount);
 
         uint256 sharesBefore = _getStrategyShares();
-        _allocateToStrategy(amount, MIN_SHARES_OUT);
-        uint256 sharesAfter = _getStrategyShares();
+        uint256 vaultBalBefore = ASSET.balanceOf(address(ROYCO_VAULT));
+        uint256 machineBalBefore = ASSET.balanceOf(address(MAKINA_MACHINE));
 
-        assertGt(sharesAfter, sharesBefore, "Shares should increase");
+        // Calculate exact expected shares
+        uint256 expectedShares = MAKINA_MACHINE.convertToShares(amount);
+
+        _allocateToStrategy(amount, MIN_SHARES_OUT);
+
+        uint256 sharesAfter = _getStrategyShares();
+        uint256 vaultBalAfter = ASSET.balanceOf(address(ROYCO_VAULT));
+        uint256 machineBalAfter = ASSET.balanceOf(address(MAKINA_MACHINE));
+
+        // Exact checks
+        assertEq(sharesAfter - sharesBefore, expectedShares, "Shares minted should match expected");
+        assertEq(vaultBalBefore - vaultBalAfter, amount, "Vault balance should decrease by exact amount");
+        assertEq(machineBalAfter - machineBalBefore, amount, "Machine balance should increase by exact amount");
+        assertEq(ASSET.balanceOf(address(STRATEGY)), 0, "Strategy should hold no idle assets");
     }
 
     function testFuzz_deallocateFunds_variousAmounts(uint256 amount) public {
@@ -537,11 +642,22 @@ abstract contract StrategyTest is TestBase {
         uint256 shares = _getStrategyShares();
         _dealAssetToMachine(amount);
 
-        uint256 vaultBalBefore = ASSET.balanceOf(address(ROYCO_VAULT));
-        _deallocateFromStrategy(shares, MIN_ASSETS_OUT);
-        uint256 vaultBalAfter = ASSET.balanceOf(address(ROYCO_VAULT));
+        // Calculate exact expected assets
+        uint256 expectedAssets = MAKINA_MACHINE.convertToAssets(shares);
 
-        assertGt(vaultBalAfter, vaultBalBefore, "Vault balance should increase");
+        uint256 vaultBalBefore = ASSET.balanceOf(address(ROYCO_VAULT));
+        uint256 machineBalBefore = ASSET.balanceOf(address(MAKINA_MACHINE));
+
+        _deallocateFromStrategy(shares, MIN_ASSETS_OUT);
+
+        uint256 vaultBalAfter = ASSET.balanceOf(address(ROYCO_VAULT));
+        uint256 machineBalAfter = ASSET.balanceOf(address(MAKINA_MACHINE));
+
+        // Exact checks
+        assertEq(vaultBalAfter - vaultBalBefore, expectedAssets, "Vault should receive exact expected assets");
+        assertEq(machineBalBefore - machineBalAfter, expectedAssets, "Machine balance should decrease by exact amount");
+        assertEq(_getStrategyShares(), 0, "Strategy shares should be exactly zero");
+        assertEq(ASSET.balanceOf(address(STRATEGY)), 0, "Strategy should hold no idle assets");
     }
 
     function testFuzz_onWithdraw_variousAmounts(uint256 withdrawAmount) public {
@@ -555,11 +671,30 @@ abstract contract StrategyTest is TestBase {
         uint256 maxWithdrawable = STRATEGY.maxWithdraw();
         withdrawAmount = bound(withdrawAmount, ALLOCATION_AMOUNT / 1000, maxWithdrawable);
 
+        uint256 strategySharesBefore = _getStrategyShares();
+        uint256 vaultBalBefore = ASSET.balanceOf(address(ROYCO_VAULT));
+        uint256 machineBalBefore = ASSET.balanceOf(address(MAKINA_MACHINE));
+
+        // Calculate exact expected values (mirrors contract logic)
+        uint256 expectedSharesToRedeem = MAKINA_MACHINE.convertToShares(withdrawAmount) + 1;
+        expectedSharesToRedeem = expectedSharesToRedeem > strategySharesBefore ? strategySharesBefore : expectedSharesToRedeem;
+        uint256 expectedWithdrawn = MAKINA_MACHINE.convertToAssets(expectedSharesToRedeem);
+
         vm.prank(address(ROYCO_VAULT));
         uint256 withdrawn = STRATEGY.onWithdraw(withdrawAmount);
 
-        // Strategy pads sharesToRedeem by +1 to guarantee withdrawn >= requested amount
+        uint256 strategySharesAfter = _getStrategyShares();
+        uint256 vaultBalAfter = ASSET.balanceOf(address(ROYCO_VAULT));
+        uint256 machineBalAfter = ASSET.balanceOf(address(MAKINA_MACHINE));
+
+        // Exact checks
+        assertEq(withdrawn, expectedWithdrawn, "Withdrawn should match expected");
+        assertEq(vaultBalAfter - vaultBalBefore, expectedWithdrawn, "Vault balance should increase by exact withdrawn");
+        assertEq(machineBalBefore - machineBalAfter, expectedWithdrawn, "Machine balance should decrease by exact withdrawn");
+        assertEq(strategySharesBefore - strategySharesAfter, expectedSharesToRedeem, "Exact shares should be consumed");
         assertGe(withdrawn, withdrawAmount, "Should withdraw at least requested amount");
+        assertLe(withdrawn - withdrawAmount, MAKINA_MACHINE.convertToAssets(1), "Overage should be at most 1 share worth");
+        assertEq(ASSET.balanceOf(address(STRATEGY)), 0, "Strategy should hold no idle assets");
     }
 
     function testFuzz_rescueToken_variousAmounts(uint256 amount) public {
@@ -743,6 +878,39 @@ abstract contract StrategyTest is TestBase {
             vm.expectRevert(RoycoVaultMakinaStrategy.ONLY_ROYCO_VAULT.selector);
             STRATEGY.allocateFunds(params);
         }
+    }
+
+    // =========================================
+    // STATEFUL INVARIANT TESTS
+    // =========================================
+
+    StrategyInvariantHandler internal handler;
+
+    function _setupInvariantHandler() internal {
+        address allocator = _getRoleHolder(address(ROYCO_VAULT), ConcreteV2RolesLib.ALLOCATOR);
+
+        handler = new StrategyInvariantHandler(
+            STRATEGY,
+            ROYCO_VAULT,
+            MAKINA_MACHINE,
+            ASSET,
+            MACHINE_SHARE_TOKEN,
+            allocator,
+            DEPLOYER_ADDRESS
+        );
+
+        // Target only the handler for invariant testing
+        targetContract(address(handler));
+    }
+
+    /// @notice Invariant: Strategy never holds idle assets after any sequence of operations
+    function invariant_noIdleAssets() public view {
+        assertTrue(handler.checkNoIdleAssets(), "Strategy must never hold idle assets");
+    }
+
+    /// @notice Invariant: onWithdraw always returns within bounds [requested, requested + 1 share worth]
+    function invariant_withdrawBounds() public view {
+        assertTrue(handler.checkWithdrawBounds(), "onWithdraw must return within bounds");
     }
 
     // =========================================

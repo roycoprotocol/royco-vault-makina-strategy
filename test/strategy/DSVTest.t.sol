@@ -9,6 +9,7 @@ import { StrategyType } from "lib/concrete-earn-v2-bug-bounty/src/interface/IStr
 contract DSVTest is StrategyTest {
     function setUp() public {
         _setupStrategyBase();
+        _setupInvariantHandler();
     }
 
     function _strategyName() internal pure override returns (string memory) {
