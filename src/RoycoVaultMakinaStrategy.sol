@@ -122,7 +122,6 @@ contract RoycoVaultMakinaStrategy is AccessManaged, Pausable, IStrategyTemplate 
         // Deposit the specified assets into the Makina machine, minting the shares to this strategy
         // NOTE: Approval for the machine to pull assets was granted on construction
         IMachine(MAKINA_MACHINE).deposit(amountAllocated, address(this), minSharesOut, bytes32(0));
-
         emit AllocateFunds(amountAllocated);
     }
 
@@ -150,7 +149,6 @@ contract RoycoVaultMakinaStrategy is AccessManaged, Pausable, IStrategyTemplate 
 
         // Redeem the shares from the Makina machine, withdrawing the assets directly to the Royco vault
         amountDeallocated = IMachine(MAKINA_MACHINE).redeem(sharesToRedeem, ROYCO_VAULT, minAssetsOut);
-
         emit DeallocateFunds(amountDeallocated);
     }
 
