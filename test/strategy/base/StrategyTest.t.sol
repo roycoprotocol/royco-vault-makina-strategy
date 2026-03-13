@@ -578,11 +578,7 @@ abstract contract StrategyTest is TestBase {
         assertGt(maxAllocBefore, 0, "Should be non-zero before recovery mode");
 
         // Mock recovery mode to return true
-        vm.mockCall(
-            address(MAKINA_MACHINE),
-            abi.encodeWithSelector(bytes4(keccak256("recoveryMode()"))),
-            abi.encode(true)
-        );
+        vm.mockCall(address(MAKINA_MACHINE), abi.encodeWithSelector(bytes4(keccak256("recoveryMode()"))), abi.encode(true));
 
         // Should return zero when in recovery mode
         uint256 maxAllocAfter = STRATEGY.maxAllocation();
@@ -642,11 +638,7 @@ abstract contract StrategyTest is TestBase {
         assertGt(maxWithdrawBefore, 0, "Should be non-zero before recovery mode");
 
         // Mock recovery mode to return true
-        vm.mockCall(
-            address(MAKINA_MACHINE),
-            abi.encodeWithSelector(bytes4(keccak256("recoveryMode()"))),
-            abi.encode(true)
-        );
+        vm.mockCall(address(MAKINA_MACHINE), abi.encodeWithSelector(bytes4(keccak256("recoveryMode()"))), abi.encode(true));
 
         // Should return zero when in recovery mode
         uint256 maxWithdrawAfter = STRATEGY.maxWithdraw();
@@ -680,11 +672,7 @@ abstract contract StrategyTest is TestBase {
 
         // Verify withdrawal succeeded and returned at least requested amount
         assertGe(withdrawn, maxWithdrawable, "Should withdraw at least maxWithdraw amount");
-        assertEq(
-            ASSET.balanceOf(address(ROYCO_VAULT)) - vaultBalBefore,
-            withdrawn,
-            "Vault should receive withdrawn assets"
-        );
+        assertEq(ASSET.balanceOf(address(ROYCO_VAULT)) - vaultBalBefore, withdrawn, "Vault should receive withdrawn assets");
         assertLt(_getStrategyShares(), sharesBefore, "Some shares should be consumed");
     }
 
