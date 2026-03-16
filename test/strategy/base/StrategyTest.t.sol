@@ -553,6 +553,38 @@ abstract contract StrategyTest is TestBase {
         assertEq(maxAlloc, expectedAssets, "Should return converted asset value");
     }
 
+    function test_maxAllocation_returnsZero_whenPaused() public {
+        // Setup a scenario where maxAllocation would normally return non-zero
+        vm.mockCall(address(MAKINA_MACHINE), abi.encodeWithSelector(IMachine.maxMint.selector), abi.encode(1000e18));
+
+        // Verify it returns non-zero when not paused
+        uint256 maxAllocBefore = STRATEGY.maxAllocation();
+        assertGt(maxAllocBefore, 0, "Should be non-zero before pause");
+
+        // Pause the strategy
+        _pauseStrategy();
+
+        // Should return zero when paused
+        uint256 maxAllocAfter = STRATEGY.maxAllocation();
+        assertEq(maxAllocAfter, 0, "Should return zero when paused");
+    }
+
+    function test_maxAllocation_returnsZero_whenInRecoveryMode() public {
+        // Setup a scenario where maxAllocation would normally return non-zero
+        vm.mockCall(address(MAKINA_MACHINE), abi.encodeWithSelector(IMachine.maxMint.selector), abi.encode(1000e18));
+
+        // Verify it returns non-zero when not in recovery mode
+        uint256 maxAllocBefore = STRATEGY.maxAllocation();
+        assertGt(maxAllocBefore, 0, "Should be non-zero before recovery mode");
+
+        // Mock recovery mode to return true
+        vm.mockCall(address(MAKINA_MACHINE), abi.encodeWithSelector(bytes4(keccak256("recoveryMode()"))), abi.encode(true));
+
+        // Should return zero when in recovery mode
+        uint256 maxAllocAfter = STRATEGY.maxAllocation();
+        assertEq(maxAllocAfter, 0, "Should return zero when in recovery mode");
+    }
+
     function test_maxWithdraw_returnsZero_whenNoAllocation() public view {
         assertEq(STRATEGY.maxWithdraw(), 0, "Should be zero initially");
     }
@@ -575,6 +607,104 @@ abstract contract StrategyTest is TestBase {
 
         uint256 maxWithdrawable = STRATEGY.maxWithdraw();
         assertEq(maxWithdrawable, expectedMaxWithdraw, "Max withdraw should match exactly");
+    }
+
+    function test_maxWithdraw_returnsZero_whenPaused() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+        _allocateToStrategy(amount, MIN_SHARES_OUT);
+        _dealAssetToMachine(amount);
+
+        // Verify it returns non-zero when not paused
+        uint256 maxWithdrawBefore = STRATEGY.maxWithdraw();
+        assertGt(maxWithdrawBefore, 0, "Should be non-zero before pause");
+
+        // Pause the strategy
+        _pauseStrategy();
+
+        // Should return zero when paused
+        uint256 maxWithdrawAfter = STRATEGY.maxWithdraw();
+        assertEq(maxWithdrawAfter, 0, "Should return zero when paused");
+    }
+
+    function test_maxWithdraw_returnsZero_whenInRecoveryMode() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+        _allocateToStrategy(amount, MIN_SHARES_OUT);
+        _dealAssetToMachine(amount);
+
+        // Verify it returns non-zero when not in recovery mode
+        uint256 maxWithdrawBefore = STRATEGY.maxWithdraw();
+        assertGt(maxWithdrawBefore, 0, "Should be non-zero before recovery mode");
+
+        // Mock recovery mode to return true
+        vm.mockCall(address(MAKINA_MACHINE), abi.encodeWithSelector(bytes4(keccak256("recoveryMode()"))), abi.encode(true));
+
+        // Should return zero when in recovery mode
+        uint256 maxWithdrawAfter = STRATEGY.maxWithdraw();
+        assertEq(maxWithdrawAfter, 0, "Should return zero when in recovery mode");
+    }
+
+    /// @notice Verifies onWithdraw(maxWithdraw()) succeeds without reverting
+    /// @dev The +1 share padding in onWithdraw could cause ExceededMaxWithdraw reverts if maxWithdraw
+    /// doesn't account for it. maxWithdraw subtracts convertToAssets(1) from machine's maxWithdraw
+    /// to leave headroom for the +1 padding
+    function test_onWithdraw_maxWithdraw_doesNotRevert() public {
+        uint256 amount = ALLOCATION_AMOUNT;
+        _setupAllocationScenario(amount);
+        _allocateToStrategy(amount, MIN_SHARES_OUT);
+
+        // Deal exactly enough liquidity to create a boundary condition
+        _dealAssetToMachine(amount);
+
+        // Get maxWithdraw (which accounts for +1 share padding via the fix)
+        uint256 maxWithdrawable = STRATEGY.maxWithdraw();
+
+        // Skip if nothing to withdraw
+        if (maxWithdrawable == 0) return;
+
+        uint256 sharesBefore = _getStrategyShares();
+        uint256 vaultBalBefore = ASSET.balanceOf(address(ROYCO_VAULT));
+
+        // This should NOT revert thanks to the fix in maxWithdraw()
+        vm.prank(address(ROYCO_VAULT));
+        uint256 withdrawn = STRATEGY.onWithdraw(maxWithdrawable);
+
+        // Verify withdrawal succeeded and returned at least requested amount
+        assertGe(withdrawn, maxWithdrawable, "Should withdraw at least maxWithdraw amount");
+        assertEq(ASSET.balanceOf(address(ROYCO_VAULT)) - vaultBalBefore, withdrawn, "Vault should receive withdrawn assets");
+        assertLt(_getStrategyShares(), sharesBefore, "Some shares should be consumed");
+    }
+
+    /// @notice Fuzz test: onWithdraw(maxWithdraw()) succeeds across variable liquidity conditions
+    function testFuzz_onWithdraw_maxWithdrawSucceedsWithVariableLiquidity(uint256 allocAmount, uint256 liquidityRatio) public {
+        // Bound allocation amount
+        uint256 maxAlloc = STRATEGY.maxAllocation();
+        if (maxAlloc < MIN_FUZZ_AMOUNT) return;
+        allocAmount = bound(allocAmount, MIN_FUZZ_AMOUNT, maxAlloc > MAX_FUZZ_AMOUNT ? MAX_FUZZ_AMOUNT : maxAlloc);
+
+        // Bound liquidity ratio (10% to 200% of allocated amount)
+        liquidityRatio = bound(liquidityRatio, 10, 200);
+
+        _setupAllocationScenario(allocAmount);
+        _allocateToStrategy(allocAmount, MIN_SHARES_OUT);
+
+        // Deal variable liquidity to create different boundary conditions
+        uint256 liquidity = (allocAmount * liquidityRatio) / 100;
+        _dealAssetToMachine(liquidity);
+
+        // Get maxWithdraw (accounts for +1 share padding)
+        uint256 maxWithdrawable = STRATEGY.maxWithdraw();
+
+        // Skip if nothing to withdraw
+        if (maxWithdrawable == 0) return;
+
+        // This should never revert when requesting maxWithdraw amount
+        vm.prank(address(ROYCO_VAULT));
+        uint256 withdrawn = STRATEGY.onWithdraw(maxWithdrawable);
+
+        // Core invariant: withdrawn >= requested (due to +1 share padding)
+        assertGe(withdrawn, maxWithdrawable, "Withdrawn must be >= maxWithdraw");
     }
 
     function test_asset_returnsCorrectAddress() public view {
