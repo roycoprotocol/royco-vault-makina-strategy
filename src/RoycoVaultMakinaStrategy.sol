@@ -97,9 +97,9 @@ contract RoycoVaultMakinaStrategy is AccessManaged, Pausable, IStrategyTemplate 
 
     /**
      * @inheritdoc IStrategyTemplate
-     * @param _allocationParams ABI encoded parameters for allocation: amount of assets to allocate (first 32 bytes) and the minimum shares minted in exchange (second 32 bytes)
      * @dev This strategy must be configured as the depositor for the machine
      * @dev Cannot be called when this strategy is paused
+     * @param _allocationParams ABI encoded parameters for allocation: amount of assets to allocate (first 32 bytes) and the minimum shares minted in exchange (second 32 bytes)
      */
     function allocateFunds(bytes calldata _allocationParams)
         external
@@ -127,9 +127,9 @@ contract RoycoVaultMakinaStrategy is AccessManaged, Pausable, IStrategyTemplate 
 
     /**
      * @inheritdoc IStrategyTemplate
-     * @param _deallocationParams ABI encoded parameters for deallocation: amount of shares to redeem (first 32 bytes) and the minimum assets deallocated in exchange (second 32 bytes)
      * @dev This strategy must be configured as the redeemer for the machine
      * @dev Cannot be called when this strategy is paused
+     * @param _deallocationParams ABI encoded parameters for deallocation: amount of shares to redeem (first 32 bytes) and the minimum assets deallocated in exchange (second 32 bytes)
      */
     function deallocateFunds(bytes calldata _deallocationParams)
         external
