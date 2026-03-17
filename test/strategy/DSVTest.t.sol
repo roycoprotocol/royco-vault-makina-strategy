@@ -21,6 +21,6 @@ contract DSVTest is StrategyTest {
     }
 
     function _forkConfiguration() internal view override returns (uint256 forkBlock, string memory forkRpcUrl) {
-        return (24_611_681, vm.envString("MAINNET_RPC_URL"));
+        return (24_679_775, vm.envString("MAINNET_RPC_URL"));
     }
 }
