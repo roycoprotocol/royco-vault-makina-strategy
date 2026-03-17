@@ -42,6 +42,7 @@ contract DeployScript is Script, Create2DeployUtils, DeploymentConfig {
     function deployFromConfig(string memory _strategyName, uint256 _deployerPrivateKey) public returns (address strategy) {
         // Assemble the init code for the strategy using its configuration
         StrategyDeploymentConfig memory config = _strategyConfigs[_strategyName];
+        require(config.roycoFactory != address(0), string.concat("Strategy config not found for: ", _strategyName));
         bytes memory strategyCreationCode = abi.encodePacked(
             type(RoycoVaultMakinaStrategy).creationCode, abi.encode(config.roycoFactory, config.roycoVault, config.makinaMachine, config.strategyType)
         );
