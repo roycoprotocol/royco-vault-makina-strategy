@@ -223,11 +223,26 @@ contract VaultMigrationSimulation is Test {
             console2.log("  Snapshot captured. totalAssets:", snap.totalAssets);
 
             if (i == 0) {
+                // DSV
+
+                // Add the Makina strategy to the vault but don't remove the Multisig strategy
                 _migrateDSV(cfg);
+
+                // Migrate the vault roles
                 _migrateVaultRoles(cfg.vault, true);
             } else {
+                // roywstETH/sroywstETH
+
+                // Add the Makina strategy to the vault and remove the Multisig strategy
                 _migrateAndReplaceStrategy(cfg);
+
+                // Set deposit limits to infinity before role migration (requires VAULT_MANAGER, held by FNDNv1)
+                _callFromFNDNv1(cfg.vault, 0, abi.encodeCall(IConcreteStandardVaultImpl.setDepositLimits, (0, type(uint256).max)));
+
+                // Migrate the vault roles
                 _migrateVaultRoles(cfg.vault, false);
+
+                // Whitelist the test depositor
                 _whitelistTestDepositor(cfg.whitelistHook, cfg.vault);
             }
 
@@ -290,8 +305,8 @@ contract VaultMigrationSimulation is Test {
         (snap.managementFee, snap.managementFeeRecipient, snap.lastManagementFeeAccrual, snap.performanceFee, snap.performanceFeeRecipient) =
             vault.getFeeConfig();
 
-        (snap.minDepositAmount, snap.maxDepositAmount) = vault.getDepositLimits();
-        (snap.minWithdrawAmount, snap.maxWithdrawAmount) = vault.getWithdrawLimits();
+        (snap.maxDepositAmount, snap.minDepositAmount) = vault.getDepositLimits();
+        (snap.maxWithdrawAmount, snap.minWithdrawAmount) = vault.getWithdrawLimits();
 
         snap.isQueueActive = asyncVault.isQueueActive();
         snap.latestEpochID = asyncVault.latestEpochID();
@@ -454,10 +469,10 @@ contract VaultMigrationSimulation is Test {
         assertEq(pFee, snap.performanceFee, "performanceFee changed");
         assertEq(pRecipient, snap.performanceFeeRecipient, "performanceFeeRecipient changed");
 
-        (uint256 minDep, uint256 maxDep) = vault.getDepositLimits();
-        (uint256 minWd, uint256 maxWd) = vault.getWithdrawLimits();
+        (uint256 maxDep, uint256 minDep) = vault.getDepositLimits();
+        (uint256 maxWd, uint256 minWd) = vault.getWithdrawLimits();
         assertEq(minDep, snap.minDepositAmount, "minDepositAmount changed");
-        assertEq(maxDep, snap.maxDepositAmount, "maxDepositAmount changed");
+        assertEq(maxDep, type(uint256).max, "maxDepositAmount should be unlimited");
         assertEq(minWd, snap.minWithdrawAmount, "minWithdrawAmount changed");
         assertEq(maxWd, snap.maxWithdrawAmount, "maxWithdrawAmount changed");
 
@@ -666,8 +681,8 @@ contract VaultMigrationSimulation is Test {
     // ═════════════════════════════════════════════════════════════════
 
     function _writeTransactionQueues() internal {
-        string memory v1Path = "script/migration/output/fndnv1_transactions.json";
-        string memory v2Path = "script/migration/output/fndnv2_transactions.json";
+        string memory v1Path = "output/fndnv1_transactions.json";
+        string memory v2Path = "output/fndnv2_transactions.json";
 
         _writeBatchJson(fndnV1Queue, v1Path, "Vault Migration - FNDNv1");
         _writeBatchJson(fndnV2Queue, v2Path, "Vault Migration - FNDNv2");
