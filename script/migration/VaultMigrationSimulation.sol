@@ -8,6 +8,7 @@ import { IConcreteAsyncVaultImpl } from "lib/concrete-earn-v2-bug-bounty/src/int
 import { IConcreteStandardVaultImpl } from "lib/concrete-earn-v2-bug-bounty/src/interface/IConcreteStandardVaultImpl.sol";
 import { ConcreteV2RolesLib as Roles } from "lib/concrete-earn-v2-bug-bounty/src/lib/Roles.sol";
 
+import { IAccessControl } from "lib/openzeppelin-contracts/contracts/access/IAccessControl.sol";
 import { Ownable } from "lib/openzeppelin-contracts/contracts/access/Ownable.sol";
 import { IAccessControlEnumerable } from "lib/openzeppelin-contracts/contracts/access/extensions/IAccessControlEnumerable.sol";
 import { IAccessManager } from "lib/openzeppelin-contracts/contracts/access/manager/IAccessManager.sol";
@@ -18,22 +19,19 @@ import { IERC20Metadata } from "lib/openzeppelin-contracts/contracts/token/ERC20
 import { RoycoVaultMakinaStrategy } from "src/RoycoVaultMakinaStrategy.sol";
 
 /// @title VaultMigrationSimulation
-/// @notice Simulates the full migration of 3 ConcreteAsyncVaults: role migration, strategy swap, and verification
-/// @dev Run with: forge test --match-contract VaultMigrationSimulation --fork-url $MAINNET_RPC_URL -vvv
+/// @notice Simulates the full migration of 3 ConcreteAsyncVaults: role migration, strategy swap, and verification.
+///         Records all transactions per-safe into queues and writes them to JSON files.
+/// @dev Run with: forge test --match-contract VaultMigrationSimulation -vvv
 contract VaultMigrationSimulation is Test {
     // ═════════════════════════════════════════════════════════════════
     //                       CONFIGURATION
     // ═════════════════════════════════════════════════════════════════
 
-    /// @dev The multisig safe that owns all 3 vaults and holds all *_ADMIN roles
     address constant FNDNv1 = 0x85De42e5697D16b853eA24259C42290DaCe35190;
-
-    /// @dev New Multisigs
     address constant FNDNv2 = 0x7c405bbD131e42af506d14e752f2e59B19D49997;
     address constant WCE = 0x84d37A25e46029CE161111420E07cEb78880119e;
     address constant DIALECTIC = 0xe7E4FA51280eB212254458d62081587Acd2077eE;
 
-    /// @dev The Royco Factory — serves as AccessManager for Makina Strategy `restricted` functions
     address constant ROYCO_FACTORY = 0x7cC6fB28eC7b5e7afC3cB3986141797ffc27253C;
 
     // ── Vault Addresses ──────────────────────────────────────────────
@@ -73,19 +71,15 @@ contract VaultMigrationSimulation is Test {
     address constant NEW_ALLOCATOR_ADMIN = FNDNv2;
     address constant NEW_WITHDRAWAL_MANAGER_ADMIN = FNDNv2;
 
-    /// @dev DSV-specific: this address retains ALLOCATOR and WITHDRAWAL_MANAGER roles alongside the new holders
     address constant DSV_ADDITIONAL_ROLE_HOLDER = 0x170ff06326eBb64BF609a848Fc143143994AF6c8;
 
-    // ── AccessManager Config for Makina Strategy `restricted` fns ────
+    // ── AccessManager Config ─────────────────────────────────────────
 
-    /// @dev The role ID to assign on the factory for strategy restricted functions
     uint64 constant STRATEGY_RESTRICTED_ROLE_ID = uint64(uint256(keccak256("STRATEGY_RESTRICTED_ROLE")));
-
-    /// @dev The address authorized to call pause/unpause/rescueToken on the Makina strategies
     address constant STRATEGY_RESTRICTED_CALLER = FNDNv2;
 
     // ── Hook Ownership Config ────────────────────────────────────────
-    // The Whitelisting Hook contracts are Ownable. Transfer ownership to the new owner.
+
     address constant NEW_HOOK_OWNER = FNDNv2;
 
     // ═════════════════════════════════════════════════════════════════
@@ -100,45 +94,51 @@ contract VaultMigrationSimulation is Test {
     }
 
     struct VaultSnapshot {
-        // Core accounting
         uint256 totalAssets;
         uint256 totalSupply;
         uint256 cachedTotalAssets;
-        uint256 sharePrice; // previewRedeem(1e18)
-        // Strategy state
+        uint256 sharePrice;
         address[] strategies;
         address[] deallocationOrder;
         uint120 multisigAllocated;
         uint256 totalAllocated;
-        // Fee config
         uint16 managementFee;
         address managementFeeRecipient;
         uint32 lastManagementFeeAccrual;
         uint16 performanceFee;
         address performanceFeeRecipient;
-        // Limits
         uint256 maxDepositAmount;
         uint256 minDepositAmount;
         uint256 maxWithdrawAmount;
         uint256 minWithdrawAmount;
-        // Async queue
         bool isQueueActive;
         uint256 latestEpochID;
-        // Role holders (first member of each role)
-        address[5] functionalRoleHolders; // VM, HM, SM, ALLOC, WM
-        address[5] adminRoleHolders; // VM_ADMIN, HM_ADMIN, SM_ADMIN, ALLOC_ADMIN, WM_ADMIN
+        address[5] functionalRoleHolders;
+        address[5] adminRoleHolders;
     }
-
-    // ═════════════════════════════════════════════════════════════════
-    //                         CONSTANTS
-    // ═════════════════════════════════════════════════════════════════
 
     struct RolePair {
         bytes32 functional;
         bytes32 admin;
     }
 
-    /// @dev All 5 vault role pairs: functional role + its admin role
+    struct Transaction {
+        address to;
+        uint256 value;
+        bytes data;
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    //                     TRANSACTION QUEUES
+    // ═════════════════════════════════════════════════════════════════
+
+    Transaction[] internal fndnV1Queue;
+    Transaction[] internal fndnV2Queue;
+
+    // ═════════════════════════════════════════════════════════════════
+    //                         CONSTANTS
+    // ═════════════════════════════════════════════════════════════════
+
     function _rolePairs() internal pure returns (RolePair[5] memory) {
         return [
             RolePair(Roles.VAULT_MANAGER, Roles.VAULT_MANAGER_ADMIN),
@@ -149,7 +149,10 @@ contract VaultMigrationSimulation is Test {
         ];
     }
 
-    /// @dev The selectors of `restricted` functions on the Makina Strategy
+    string[5] internal ROLE_NAMES = ["VAULT_MANAGER", "HOOK_MANAGER", "STRATEGY_MANAGER", "ALLOCATOR", "WITHDRAWAL_MANAGER"];
+    string[5] internal ADMIN_ROLE_NAMES =
+        ["VAULT_MANAGER_ADMIN", "HOOK_MANAGER_ADMIN", "STRATEGY_MANAGER_ADMIN", "ALLOCATOR_ADMIN", "WITHDRAWAL_MANAGER_ADMIN"];
+
     bytes4[3] internal STRATEGY_RESTRICTED_SELECTORS =
         [RoycoVaultMakinaStrategy.rescueToken.selector, RoycoVaultMakinaStrategy.pause.selector, RoycoVaultMakinaStrategy.unpause.selector];
 
@@ -159,6 +162,24 @@ contract VaultMigrationSimulation is Test {
 
     function setUp() public {
         vm.createSelectFork(vm.envString("MAINNET_RPC_URL"), 24_680_567);
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    //                   TX QUEUE HELPERS
+    // ═════════════════════════════════════════════════════════════════
+
+    function _callFromFNDNv1(address to, uint256 value, bytes memory data) internal {
+        fndnV1Queue.push(Transaction({ to: to, value: value, data: data }));
+        vm.prank(FNDNv1);
+        (bool success, bytes memory ret) = to.call{ value: value }(data);
+        require(success, string.concat("FNDNv1 tx failed: ", string(ret)));
+    }
+
+    function _callFromFNDNv2(address to, uint256 value, bytes memory data) internal {
+        fndnV2Queue.push(Transaction({ to: to, value: value, data: data }));
+        vm.prank(FNDNv2);
+        (bool success, bytes memory ret) = to.call{ value: value }(data);
+        require(success, string.concat("FNDNv2 tx failed: ", string(ret)));
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -182,11 +203,12 @@ contract VaultMigrationSimulation is Test {
             })
         ];
 
+        string[3] memory labels = ["DSV", "roywstETH", "sroywstETH"];
+
         for (uint256 i = 0; i < 3; i++) {
             VaultConfig memory cfg = configs[i];
-            string memory label = i == 0 ? "DSV" : (i == 1 ? "roywstETH" : "sroywstETH");
             console2.log("========================================");
-            console2.log("Migrating vault:", label);
+            console2.log("Migrating vault:", labels[i]);
             console2.log("========================================");
 
             // Step 0: Configure Makina Strategy on Royco Factory
@@ -197,47 +219,47 @@ contract VaultMigrationSimulation is Test {
             console2.log("  Snapshot captured. totalAssets:", snap.totalAssets);
 
             if (i == 0) {
-                // Step 2: Strategy migration
                 _migrateDSV(cfg);
-
-                // Step 3: Vault role migration
                 _migrateVaultRoles(cfg.vault, true);
             } else {
-                // Step 2: Strategy migration
                 _migrateAndReplaceStrategy(cfg);
-
-                // Step 3: Vault role migration
                 _migrateVaultRoles(cfg.vault, false);
             }
 
-            // Step 4: Hook ownership transfer
-            _migrateHookRoles(cfg.whitelistHook);
+            // Hook ownership transfer
+            _migrateHookOwnership(cfg.whitelistHook);
 
-            // Step 5: Verification
+            // Verification
             _verifyAll(cfg, snap, i == 0);
 
             console2.log("  Migration complete and verified.");
         }
+
+        // Print final state for all vaults
+        console2.log("");
+        console2.log("========================================");
+        console2.log("         FINAL VAULT STATES");
+        console2.log("========================================");
+        for (uint256 i = 0; i < 3; i++) {
+            _printVaultState(configs[i], labels[i]);
+        }
+
+        // Write transaction queues to files
+        _writeTransactionQueues();
     }
 
     // ═════════════════════════════════════════════════════════════════
     //              STEP 0: CONFIGURE FACTORY ACCESS MANAGER
     // ═════════════════════════════════════════════════════════════════
 
-    /// @notice Configures the Royco Factory (AccessManager) to authorize the intended caller
-    ///         for the Makina Strategy's `restricted` functions (pause, unpause, rescueToken)
     function _configureStrategyOnFactory(address makinaStrategy) internal {
-        IAccessManager factory = IAccessManager(ROYCO_FACTORY);
-
         bytes4[] memory selectors = new bytes4[](3);
         selectors[0] = STRATEGY_RESTRICTED_SELECTORS[0];
         selectors[1] = STRATEGY_RESTRICTED_SELECTORS[1];
         selectors[2] = STRATEGY_RESTRICTED_SELECTORS[2];
 
-        vm.startPrank(FNDNv2);
-        factory.setTargetFunctionRole(makinaStrategy, selectors, STRATEGY_RESTRICTED_ROLE_ID);
-        factory.grantRole(STRATEGY_RESTRICTED_ROLE_ID, STRATEGY_RESTRICTED_CALLER, 0);
-        vm.stopPrank();
+        _callFromFNDNv2(ROYCO_FACTORY, 0, abi.encodeCall(IAccessManager.setTargetFunctionRole, (makinaStrategy, selectors, STRATEGY_RESTRICTED_ROLE_ID)));
+        _callFromFNDNv2(ROYCO_FACTORY, 0, abi.encodeCall(IAccessManager.grantRole, (STRATEGY_RESTRICTED_ROLE_ID, STRATEGY_RESTRICTED_CALLER, 0)));
     }
 
     // ═════════════════════════════════════════════════════════════════
@@ -250,31 +272,25 @@ contract VaultMigrationSimulation is Test {
         IConcreteAsyncVaultImpl asyncVault = IConcreteAsyncVaultImpl(cfg.vault);
         IAccessControlEnumerable acl = IAccessControlEnumerable(cfg.vault);
 
-        // Core accounting
         snap.totalAssets = erc4626.totalAssets();
         snap.totalSupply = erc4626.totalSupply();
         snap.cachedTotalAssets = vault.cachedTotalAssets();
         snap.sharePrice = snap.totalSupply > 0 ? erc4626.previewRedeem(1e18) : 0;
 
-        // Strategy state
         snap.strategies = vault.getStrategies();
         snap.deallocationOrder = vault.getDeallocationOrder();
         snap.multisigAllocated = vault.getStrategyData(cfg.multisigStrategy).allocated;
         snap.totalAllocated = vault.getTotalAllocated();
 
-        // Fee config
         (snap.managementFee, snap.managementFeeRecipient, snap.lastManagementFeeAccrual, snap.performanceFee, snap.performanceFeeRecipient) =
             vault.getFeeConfig();
 
-        // Limits
         (snap.minDepositAmount, snap.maxDepositAmount) = vault.getDepositLimits();
         (snap.minWithdrawAmount, snap.maxWithdrawAmount) = vault.getWithdrawLimits();
 
-        // Async queue
         snap.isQueueActive = asyncVault.isQueueActive();
         snap.latestEpochID = asyncVault.latestEpochID();
 
-        // Role holders
         RolePair[5] memory roles = _rolePairs();
         for (uint256 i = 0; i < 5; i++) {
             uint256 fCount = acl.getRoleMemberCount(roles[i].functional);
@@ -289,55 +305,42 @@ contract VaultMigrationSimulation is Test {
     //                 STEP 2A: DSV STRATEGY MIGRATION
     // ═════════════════════════════════════════════════════════════════
 
-    /// @notice DSV: Keep existing MultisigStrategy, add Makina Strategy alongside it
     function _migrateDSV(VaultConfig memory cfg) internal {
-        IConcreteStandardVaultImpl vault = IConcreteStandardVaultImpl(cfg.vault);
-
-        vm.startPrank(FNDNv1);
-
         // Add Makina Strategy
-        vault.addStrategy(cfg.makinaStrategy);
+        _callFromFNDNv1(cfg.vault, 0, abi.encodeCall(IConcreteStandardVaultImpl.addStrategy, (cfg.makinaStrategy)));
 
         // Append Makina to existing deallocation order
-        address[] memory currentOrder = vault.getDeallocationOrder();
+        address[] memory currentOrder = IConcreteStandardVaultImpl(cfg.vault).getDeallocationOrder();
         address[] memory newOrder = new address[](currentOrder.length + 1);
         for (uint256 i = 0; i < currentOrder.length; i++) {
             newOrder[i] = currentOrder[i];
         }
         newOrder[currentOrder.length] = cfg.makinaStrategy;
-        vault.setDeallocationOrder(newOrder);
-
-        vm.stopPrank();
+        _callFromFNDNv1(cfg.vault, 0, abi.encodeCall(IConcreteStandardVaultImpl.setDeallocationOrder, (newOrder)));
     }
 
     // ═════════════════════════════════════════════════════════════════
     //           STEP 2B: REPLACE STRATEGY (roywstETH, sroywstETH)
     // ═════════════════════════════════════════════════════════════════
 
-    /// @notice Replace MultisigStrategy with Makina Strategy (no funds in multisig)
     function _migrateAndReplaceStrategy(VaultConfig memory cfg) internal {
-        IConcreteStandardVaultImpl vault = IConcreteStandardVaultImpl(cfg.vault);
-
         // FNDNv1 has ALLOCATOR_ADMIN but not ALLOCATOR on non-DSV vaults — self-grant first
-        vm.startPrank(FNDNv1);
-        vault.grantRole(Roles.ALLOCATOR, FNDNv1);
+        _callFromFNDNv1(cfg.vault, 0, abi.encodeCall(IAccessControl.grantRole, (Roles.ALLOCATOR, FNDNv1)));
 
         // Add Makina Strategy
-        vault.addStrategy(cfg.makinaStrategy);
+        _callFromFNDNv1(cfg.vault, 0, abi.encodeCall(IConcreteStandardVaultImpl.addStrategy, (cfg.makinaStrategy)));
 
         // Set deallocation order to only include Makina
         address[] memory newOrder = new address[](1);
         newOrder[0] = cfg.makinaStrategy;
-        vault.setDeallocationOrder(newOrder);
+        _callFromFNDNv1(cfg.vault, 0, abi.encodeCall(IConcreteStandardVaultImpl.setDeallocationOrder, (newOrder)));
 
-        // Remove MultisigStrategy (precondition: allocated == 0, not in deallocation order)
-        vault.removeStrategy(cfg.multisigStrategy);
-
-        vm.stopPrank();
+        // Remove MultisigStrategy
+        _callFromFNDNv1(cfg.vault, 0, abi.encodeCall(IConcreteStandardVaultImpl.removeStrategy, (cfg.multisigStrategy)));
     }
 
     // ═════════════════════════════════════════════════════════════════
-    //                 STEP 4: VAULT ROLE MIGRATION
+    //                 STEP 3: VAULT ROLE MIGRATION
     // ═════════════════════════════════════════════════════════════════
 
     function _migrateVaultRoles(address vault, bool isDSV) internal {
@@ -348,15 +351,13 @@ contract VaultMigrationSimulation is Test {
         address[5] memory newAdmin =
             [NEW_VAULT_MANAGER_ADMIN, NEW_HOOK_MANAGER_ADMIN, NEW_STRATEGY_MANAGER_ADMIN, NEW_ALLOCATOR_ADMIN, NEW_WITHDRAWAL_MANAGER_ADMIN];
 
-        vm.startPrank(FNDNv1);
-
         // ── Phase A: Grant all new holders first ──
         for (uint256 i = 0; i < 5; i++) {
             if (!acl.hasRole(roles[i].admin, newAdmin[i])) {
-                IConcreteStandardVaultImpl(vault).grantRole(roles[i].admin, newAdmin[i]);
+                _callFromFNDNv1(vault, 0, abi.encodeCall(IAccessControl.grantRole, (roles[i].admin, newAdmin[i])));
             }
             if (!acl.hasRole(roles[i].functional, newFunctional[i])) {
-                IConcreteStandardVaultImpl(vault).grantRole(roles[i].functional, newFunctional[i]);
+                _callFromFNDNv1(vault, 0, abi.encodeCall(IAccessControl.grantRole, (roles[i].functional, newFunctional[i])));
             }
         }
 
@@ -366,13 +367,12 @@ contract VaultMigrationSimulation is Test {
             for (uint256 j = count; j > 0; j--) {
                 address member = acl.getRoleMember(roles[i].functional, j - 1);
                 if (member == newFunctional[i]) continue;
-                // DSV: preserve the additional holder for ALLOCATOR and WITHDRAWAL_MANAGER
                 if (isDSV && member == DSV_ADDITIONAL_ROLE_HOLDER) {
                     if (roles[i].functional == Roles.ALLOCATOR || roles[i].functional == Roles.WITHDRAWAL_MANAGER) {
                         continue;
                     }
                 }
-                IConcreteStandardVaultImpl(vault).revokeRole(roles[i].functional, member);
+                _callFromFNDNv1(vault, 0, abi.encodeCall(IAccessControl.revokeRole, (roles[i].functional, member)));
             }
         }
 
@@ -382,28 +382,25 @@ contract VaultMigrationSimulation is Test {
             for (uint256 j = count; j > 0; j--) {
                 address member = acl.getRoleMember(roles[i].admin, j - 1);
                 if (member != newAdmin[i]) {
-                    IConcreteStandardVaultImpl(vault).revokeRole(roles[i].admin, member);
+                    _callFromFNDNv1(vault, 0, abi.encodeCall(IAccessControl.revokeRole, (roles[i].admin, member)));
                 }
             }
         }
-
-        vm.stopPrank();
     }
 
     // ═════════════════════════════════════════════════════════════════
-    //                 STEP 5: HOOK ROLE MIGRATION
+    //                 STEP 4: HOOK OWNERSHIP TRANSFER
     // ═════════════════════════════════════════════════════════════════
 
-    function _migrateHookRoles(address hook) internal {
+    function _migrateHookOwnership(address hook) internal {
         if (hook == address(0)) return;
         if (Ownable(hook).owner() == NEW_HOOK_OWNER) return;
 
-        vm.prank(FNDNv1);
-        Ownable(hook).transferOwnership(NEW_HOOK_OWNER);
+        _callFromFNDNv1(hook, 0, abi.encodeCall(Ownable.transferOwnership, (NEW_HOOK_OWNER)));
     }
 
     // ═════════════════════════════════════════════════════════════════
-    //                 STEP 6: VERIFICATION
+    //                      VERIFICATION
     // ═════════════════════════════════════════════════════════════════
 
     function _verifyAll(VaultConfig memory cfg, VaultSnapshot memory snap, bool isDSV) internal {
@@ -415,8 +412,6 @@ contract VaultMigrationSimulation is Test {
         _verifyAccessManagerConfig(cfg.makinaStrategy);
     }
 
-    // ── 6.1: State Invariants ────────────────────────────────────────
-
     function _verifyStateInvariants(VaultConfig memory cfg, VaultSnapshot memory snap) internal view {
         IERC4626 erc4626 = IERC4626(cfg.vault);
         IConcreteStandardVaultImpl vault = IConcreteStandardVaultImpl(cfg.vault);
@@ -425,12 +420,10 @@ contract VaultMigrationSimulation is Test {
         assertEq(erc4626.totalAssets(), snap.totalAssets, "totalAssets changed");
         assertEq(erc4626.totalSupply(), snap.totalSupply, "totalSupply changed");
         assertEq(vault.cachedTotalAssets(), snap.cachedTotalAssets, "cachedTotalAssets changed");
-
         if (snap.totalSupply > 0) {
             assertEq(erc4626.previewRedeem(1e18), snap.sharePrice, "share price changed");
         }
 
-        // Fee config unchanged
         (uint16 mFee, address mRecipient, uint32 mAccrual, uint16 pFee, address pRecipient) = vault.getFeeConfig();
         assertEq(mFee, snap.managementFee, "managementFee changed");
         assertEq(mRecipient, snap.managementFeeRecipient, "managementFeeRecipient changed");
@@ -438,7 +431,6 @@ contract VaultMigrationSimulation is Test {
         assertEq(pFee, snap.performanceFee, "performanceFee changed");
         assertEq(pRecipient, snap.performanceFeeRecipient, "performanceFeeRecipient changed");
 
-        // Limits unchanged
         (uint256 minDep, uint256 maxDep) = vault.getDepositLimits();
         (uint256 minWd, uint256 maxWd) = vault.getWithdrawLimits();
         assertEq(minDep, snap.minDepositAmount, "minDepositAmount changed");
@@ -446,14 +438,11 @@ contract VaultMigrationSimulation is Test {
         assertEq(minWd, snap.minWithdrawAmount, "minWithdrawAmount changed");
         assertEq(maxWd, snap.maxWithdrawAmount, "maxWithdrawAmount changed");
 
-        // Async queue state unchanged
         assertEq(asyncVault.isQueueActive(), snap.isQueueActive, "isQueueActive changed");
         assertEq(asyncVault.latestEpochID(), snap.latestEpochID, "latestEpochID changed");
 
         console2.log("    [OK] State invariants verified");
     }
-
-    // ── 6.2: Role Verification ───────────────────────────────────────
 
     function _verifyRoles(address vault, bool isDSV) internal view {
         IAccessControlEnumerable acl = IAccessControlEnumerable(vault);
@@ -464,17 +453,12 @@ contract VaultMigrationSimulation is Test {
             [NEW_VAULT_MANAGER_ADMIN, NEW_HOOK_MANAGER_ADMIN, NEW_STRATEGY_MANAGER_ADMIN, NEW_ALLOCATOR_ADMIN, NEW_WITHDRAWAL_MANAGER_ADMIN];
 
         for (uint256 i = 0; i < 5; i++) {
-            // New functional holder has the role
             assertTrue(acl.hasRole(roles[i].functional, expectedFunctional[i]), string.concat("New functional holder missing role at index ", vm.toString(i)));
-
-            // New admin holder has the role, exactly 1
             assertTrue(acl.hasRole(roles[i].admin, expectedAdmin[i]), string.concat("New admin holder missing role at index ", vm.toString(i)));
             assertEq(acl.getRoleMemberCount(roles[i].admin), 1, string.concat("Admin role member count != 1 at index ", vm.toString(i)));
 
-            // Check functional role member count
             bool isAllocatorOrWM = (roles[i].functional == Roles.ALLOCATOR || roles[i].functional == Roles.WITHDRAWAL_MANAGER);
             if (isDSV && isAllocatorOrWM) {
-                // DSV: ALLOCATOR and WITHDRAWAL_MANAGER have 2 holders (new + additional)
                 assertEq(acl.getRoleMemberCount(roles[i].functional), 2, string.concat("DSV functional role member count != 2 at index ", vm.toString(i)));
                 assertTrue(
                     acl.hasRole(roles[i].functional, DSV_ADDITIONAL_ROLE_HOLDER), string.concat("DSV additional holder missing role at index ", vm.toString(i))
@@ -483,7 +467,6 @@ contract VaultMigrationSimulation is Test {
                 assertEq(acl.getRoleMemberCount(roles[i].functional), 1, string.concat("Functional role member count != 1 at index ", vm.toString(i)));
             }
 
-            // FNDNv1 no longer has either role
             if (FNDNv1 != expectedFunctional[i]) {
                 assertFalse(acl.hasRole(roles[i].functional, FNDNv1), "FNDNv1 still has functional role");
             }
@@ -491,31 +474,23 @@ contract VaultMigrationSimulation is Test {
                 assertFalse(acl.hasRole(roles[i].admin, FNDNv1), "FNDNv1 still has admin role");
             }
         }
-
         console2.log("    [OK] Vault roles verified");
     }
 
-    // ── 6.3: Hook Ownership ─────────────────────────────────────────
-
     function _verifyHookOwnership(address hook) internal view {
         if (hook == address(0)) {
-            console2.log("    [SKIP] No whitelist hook configured for ownership check");
+            console2.log("    [SKIP] No whitelist hook configured");
             return;
         }
-
         assertEq(Ownable(hook).owner(), NEW_HOOK_OWNER, "Hook ownership not transferred");
         assertTrue(Ownable(hook).owner() != FNDNv1, "Hook still owned by old safe");
-
         console2.log("    [OK] Hook ownership verified");
     }
-
-    // ── 6.4: Strategy State ──────────────────────────────────────────
 
     function _verifyStrategyState(VaultConfig memory cfg, VaultSnapshot memory snap, bool isDSV) internal view {
         IConcreteStandardVaultImpl vault = IConcreteStandardVaultImpl(cfg.vault);
 
         if (isDSV) {
-            // DSV: Both strategies should be active
             address[] memory strategies = vault.getStrategies();
             assertTrue(strategies.length >= 2, "DSV should have at least 2 strategies");
             assertTrue(_contains(strategies, cfg.multisigStrategy), "DSV missing multisig strategy");
@@ -529,12 +504,10 @@ contract VaultMigrationSimulation is Test {
             assertEq(uint8(mkData.status), uint8(IConcreteStandardVaultImpl.StrategyStatus.Active), "DSV makina strategy not Active");
             assertEq(mkData.allocated, 0, "DSV makina strategy should have 0 allocated");
 
-            // Deallocation order should contain both
             address[] memory order = vault.getDeallocationOrder();
             assertTrue(_contains(order, cfg.multisigStrategy), "DSV dealloc order missing multisig");
             assertTrue(_contains(order, cfg.makinaStrategy), "DSV dealloc order missing makina");
         } else {
-            // roywstETH / sroywstETH: Only Makina strategy
             address[] memory strategies = vault.getStrategies();
             assertEq(strategies.length, 1, "Non-DSV should have exactly 1 strategy");
             assertEq(strategies[0], cfg.makinaStrategy, "Non-DSV strategy should be makina");
@@ -543,7 +516,6 @@ contract VaultMigrationSimulation is Test {
             assertEq(uint8(mkData.status), uint8(IConcreteStandardVaultImpl.StrategyStatus.Active), "Makina strategy not Active");
             assertEq(mkData.allocated, 0, "Makina strategy should have 0 allocated");
 
-            // Multisig should be gone
             IConcreteStandardVaultImpl.StrategyData memory msData = vault.getStrategyData(cfg.multisigStrategy);
             assertEq(uint8(msData.status), uint8(IConcreteStandardVaultImpl.StrategyStatus.Inactive), "Multisig strategy should be Inactive (removed)");
 
@@ -551,41 +523,147 @@ contract VaultMigrationSimulation is Test {
             assertEq(order.length, 1, "Non-DSV dealloc order should have 1 entry");
             assertEq(order[0], cfg.makinaStrategy, "Non-DSV dealloc order should be makina");
         }
-
         console2.log("    [OK] Strategy state verified");
     }
 
-    // ── 6.4: Makina Strategy Sanity ──────────────────────────────────
-
     function _verifyMakinaStrategySanity(VaultConfig memory cfg) internal view {
         RoycoVaultMakinaStrategy strategy = RoycoVaultMakinaStrategy(cfg.makinaStrategy);
-
         assertEq(strategy.asset(), IERC4626(cfg.vault).asset(), "Strategy asset mismatch");
         assertEq(strategy.getVault(), cfg.vault, "Strategy vault mismatch");
         assertEq(strategy.totalAllocatedValue(), 0, "Strategy should have 0 allocated value");
-
         console2.log("    [OK] Makina strategy sanity verified");
     }
 
-    // ── 6.5: AccessManager Config ────────────────────────────────────
-
     function _verifyAccessManagerConfig(address makinaStrategy) internal {
         IAccessManager factory = IAccessManager(ROYCO_FACTORY);
-
-        // Authorized caller can call restricted functions
         for (uint256 i = 0; i < 3; i++) {
             (bool allowed,) = factory.canCall(STRATEGY_RESTRICTED_CALLER, makinaStrategy, STRATEGY_RESTRICTED_SELECTORS[i]);
             assertTrue(allowed, string.concat("Restricted caller not authorized for selector index ", vm.toString(i)));
         }
-
-        // Random address cannot call restricted functions
         address rando = makeAddr("unauthorized");
         for (uint256 i = 0; i < 3; i++) {
             (bool allowed,) = factory.canCall(rando, makinaStrategy, STRATEGY_RESTRICTED_SELECTORS[i]);
             assertFalse(allowed, string.concat("Random address authorized for selector index ", vm.toString(i)));
         }
-
         console2.log("    [OK] AccessManager config verified");
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    //                   FINAL STATE PRINTER
+    // ═════════════════════════════════════════════════════════════════
+
+    function _printVaultState(VaultConfig memory cfg, string memory label) internal view {
+        IConcreteStandardVaultImpl vault = IConcreteStandardVaultImpl(cfg.vault);
+        IConcreteAsyncVaultImpl asyncVault = IConcreteAsyncVaultImpl(cfg.vault);
+        IAccessControlEnumerable acl = IAccessControlEnumerable(cfg.vault);
+        IERC4626 erc4626 = IERC4626(cfg.vault);
+        RolePair[5] memory roles = _rolePairs();
+
+        console2.log("");
+        console2.log("----------------------------------------");
+        console2.log("  Vault:", label);
+        console2.log("  Address:", cfg.vault);
+        console2.log("  Asset:", erc4626.asset());
+        console2.log("----------------------------------------");
+
+        // Accounting
+        console2.log("  totalAssets:", erc4626.totalAssets());
+        console2.log("  totalSupply:", erc4626.totalSupply());
+        console2.log("  cachedTotalAssets:", vault.cachedTotalAssets());
+        console2.log("  totalAllocated:", vault.getTotalAllocated());
+        console2.log("  isQueueActive:", asyncVault.isQueueActive());
+        console2.log("  latestEpochID:", asyncVault.latestEpochID());
+
+        // Strategies
+        address[] memory strategies = vault.getStrategies();
+        console2.log("  Strategies (count):", strategies.length);
+        for (uint256 i = 0; i < strategies.length; i++) {
+            IConcreteStandardVaultImpl.StrategyData memory sd = vault.getStrategyData(strategies[i]);
+            console2.log("    -", strategies[i]);
+            console2.log("      status:", uint8(sd.status));
+            console2.log("      allocated:", sd.allocated);
+        }
+
+        address[] memory order = vault.getDeallocationOrder();
+        console2.log("  Deallocation order (count):", order.length);
+        for (uint256 i = 0; i < order.length; i++) {
+            console2.log("    -", order[i]);
+        }
+
+        // Roles
+        console2.log("  Roles:");
+        for (uint256 i = 0; i < 5; i++) {
+            uint256 fCount = acl.getRoleMemberCount(roles[i].functional);
+            console2.log(string.concat("    ", ROLE_NAMES[i], " (", vm.toString(fCount), " members):"));
+            for (uint256 j = 0; j < fCount; j++) {
+                console2.log("      -", acl.getRoleMember(roles[i].functional, j));
+            }
+            uint256 aCount = acl.getRoleMemberCount(roles[i].admin);
+            console2.log(string.concat("    ", ADMIN_ROLE_NAMES[i], " (", vm.toString(aCount), " members):"));
+            for (uint256 j = 0; j < aCount; j++) {
+                console2.log("      -", acl.getRoleMember(roles[i].admin, j));
+            }
+        }
+
+        // Hook
+        if (cfg.whitelistHook != address(0)) {
+            console2.log("  Whitelist Hook:", cfg.whitelistHook);
+            console2.log("    owner:", Ownable(cfg.whitelistHook).owner());
+        }
+
+        // Makina Strategy
+        console2.log("  Makina Strategy:", cfg.makinaStrategy);
+        console2.log("    asset:", RoycoVaultMakinaStrategy(cfg.makinaStrategy).asset());
+        console2.log("    vault:", RoycoVaultMakinaStrategy(cfg.makinaStrategy).getVault());
+        console2.log("    machine:", RoycoVaultMakinaStrategy(cfg.makinaStrategy).getMakinaMachine());
+        console2.log("    totalAllocatedValue:", RoycoVaultMakinaStrategy(cfg.makinaStrategy).totalAllocatedValue());
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    //                 TRANSACTION QUEUE WRITER
+    // ═════════════════════════════════════════════════════════════════
+
+    function _writeTransactionQueues() internal {
+        string memory v1Path = "script/migration/output/fndnv1_transactions.json";
+        string memory v2Path = "script/migration/output/fndnv2_transactions.json";
+
+        _writeBatchJson(fndnV1Queue, v1Path, "Vault Migration - FNDNv1");
+        _writeBatchJson(fndnV2Queue, v2Path, "Vault Migration - FNDNv2");
+
+        console2.log("");
+        console2.log("========================================");
+        console2.log("  Transaction queues written:");
+        console2.log("    FNDNv1:", fndnV1Queue.length, "transactions ->", v1Path);
+        console2.log("    FNDNv2:", fndnV2Queue.length, "transactions ->", v2Path);
+        console2.log("========================================");
+    }
+
+    /// @dev Writes a Safe Transaction Builder compatible JSON batch file
+    function _writeBatchJson(Transaction[] storage queue, string memory path, string memory name) internal {
+        // Build each transaction object and collect into an array
+        string[] memory txJsons = new string[](queue.length);
+        for (uint256 i = 0; i < queue.length; i++) {
+            string memory key = string.concat("tx", vm.toString(i));
+            vm.serializeAddress(key, "to", queue[i].to);
+            vm.serializeString(key, "value", vm.toString(queue[i].value));
+            txJsons[i] = vm.serializeBytes(key, "data", queue[i].data);
+        }
+
+        // Build the root object
+        string memory root = "root";
+        vm.serializeString(root, "version", "1.0");
+        vm.serializeString(root, "chainId", "1");
+        vm.serializeUint(root, "createdAt", block.timestamp);
+
+        // Meta object
+        string memory meta = vm.serializeString("meta", "name", name);
+        meta = vm.serializeString("meta", "description", "Vault migration batch");
+        vm.serializeString(root, "meta", meta);
+
+        // Serialize transactions array
+        string memory finalJson = vm.serializeString(root, "transactions", txJsons);
+
+        vm.writeJson(finalJson, path);
     }
 
     // ═════════════════════════════════════════════════════════════════
