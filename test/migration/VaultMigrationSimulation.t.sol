@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
-import { Test } from "lib/forge-std/src/Test.sol";
-import { console2 } from "lib/forge-std/src/console2.sol";
-
+import { IAllocateModule } from "lib/concrete-earn-v2-bug-bounty/src/interface/IAllocateModule.sol";
 import { IConcreteAsyncVaultImpl } from "lib/concrete-earn-v2-bug-bounty/src/interface/IConcreteAsyncVaultImpl.sol";
 import { IConcreteStandardVaultImpl } from "lib/concrete-earn-v2-bug-bounty/src/interface/IConcreteStandardVaultImpl.sol";
 import { ConcreteV2RolesLib as Roles } from "lib/concrete-earn-v2-bug-bounty/src/lib/Roles.sol";
-
+import { Test } from "lib/forge-std/src/Test.sol";
+import { console2 } from "lib/forge-std/src/console2.sol";
+import { IMachine } from "lib/makina-core/src/interfaces/IMachine.sol";
 import { IAccessControl } from "lib/openzeppelin-contracts/contracts/access/IAccessControl.sol";
 import { Ownable } from "lib/openzeppelin-contracts/contracts/access/Ownable.sol";
 import { IAccessControlEnumerable } from "lib/openzeppelin-contracts/contracts/access/extensions/IAccessControlEnumerable.sol";
@@ -15,7 +15,6 @@ import { IAccessManager } from "lib/openzeppelin-contracts/contracts/access/mana
 import { IERC4626 } from "lib/openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 import { IERC20 } from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import { IERC20Metadata } from "lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-
 import { RoycoVaultMakinaStrategy } from "src/RoycoVaultMakinaStrategy.sol";
 
 interface IWhitelistHook {
@@ -166,6 +165,11 @@ contract VaultMigrationSimulation is Test {
 
     bytes4[3] internal STRATEGY_RESTRICTED_SELECTORS =
         [RoycoVaultMakinaStrategy.rescueToken.selector, RoycoVaultMakinaStrategy.pause.selector, RoycoVaultMakinaStrategy.unpause.selector];
+
+    /// @dev EIP-7201 storage slot for Makina Machine storage
+    bytes32 private constant MACHINE_STORAGE_LOCATION = 0x55fe2a17e400bcd0e2125123a7fc955478e727b29a4c522f4f2bd95d961bd900;
+    uint256 private constant DEPOSITOR_SLOT_OFFSET = 2;
+    uint256 private constant REDEEMER_SLOT_OFFSET = 3;
 
     // ═════════════════════════════════════════════════════════════════
     //                   TX QUEUE HELPERS
@@ -447,7 +451,7 @@ contract VaultMigrationSimulation is Test {
         _verifyStrategyState(cfg, snap, isDSV);
         _verifyMakinaStrategySanity(cfg);
         _verifyAccessManagerConfig(cfg.makinaStrategy);
-        _verifyDeposit(cfg.vault);
+        _verifyDepositAndAllocate(cfg);
     }
 
     function _verifyStateInvariants(VaultConfig memory cfg, VaultSnapshot memory snap) internal view {
@@ -586,23 +590,78 @@ contract VaultMigrationSimulation is Test {
         console2.log("    [OK] AccessManager config verified");
     }
 
-    function _verifyDeposit(address vault) internal {
-        IERC4626 erc4626 = IERC4626(vault);
+    function _verifyDepositAndAllocate(VaultConfig memory cfg) internal {
+        IERC4626 erc4626 = IERC4626(cfg.vault);
         address asset = erc4626.asset();
         uint8 decimals = IERC20Metadata(asset).decimals();
         uint256 depositAmount = 10 ** decimals; // 1 token
 
-        // Deal 1 token to the test depositor
+        // ── 1. Deposit into vault ──
         deal(asset, TEST_DEPOSITOR, depositAmount);
-
-        // Deposit
         vm.startPrank(TEST_DEPOSITOR);
-        IERC20(asset).approve(vault, depositAmount);
+        IERC20(asset).approve(cfg.vault, depositAmount);
         uint256 shares = erc4626.deposit(depositAmount, TEST_DEPOSITOR);
         vm.stopPrank();
 
         assertTrue(shares > 0, "Deposit returned 0 shares");
         console2.log("    [OK] Deposit verified - shares received:", shares);
+
+        // ── 2. Configure strategy as depositor/redeemer on the Makina Machine (vm.store override) ──
+        RoycoVaultMakinaStrategy strategy = RoycoVaultMakinaStrategy(cfg.makinaStrategy);
+        address machine = strategy.getMakinaMachine();
+
+        // Save original depositor/redeemer to restore after
+        address originalDepositor = IMachine(machine).depositor();
+        address originalRedeemer = IMachine(machine).redeemer();
+
+        bytes32 depositorSlot = bytes32(uint256(MACHINE_STORAGE_LOCATION) + DEPOSITOR_SLOT_OFFSET);
+        bytes32 redeemerSlot = bytes32(uint256(MACHINE_STORAGE_LOCATION) + REDEEMER_SLOT_OFFSET);
+
+        vm.store(machine, depositorSlot, bytes32(uint256(uint160(cfg.makinaStrategy))));
+        vm.store(machine, redeemerSlot, bytes32(uint256(uint160(cfg.makinaStrategy))));
+
+        // ── 3. Allocate to the Makina strategy through the vault ──
+        address allocator = IAccessControlEnumerable(cfg.vault).getRoleMember(Roles.ALLOCATOR, 0);
+
+        uint256 machineBalBefore = IERC20(asset).balanceOf(machine);
+
+        IAllocateModule.AllocateParams[] memory allocParams = new IAllocateModule.AllocateParams[](1);
+        allocParams[0] = IAllocateModule.AllocateParams({
+            isDeposit: true,
+            strategy: cfg.makinaStrategy,
+            extraData: abi.encode(depositAmount, uint256(0)) // amount, minSharesOut
+        });
+
+        vm.prank(allocator);
+        IConcreteStandardVaultImpl(cfg.vault).allocate(abi.encode(allocParams));
+
+        uint256 machineBalAfter = IERC20(asset).balanceOf(machine);
+        assertEq(machineBalAfter - machineBalBefore, depositAmount, "Machine did not receive exact deposit amount");
+
+        uint256 allocatedValue = strategy.totalAllocatedValue();
+        assertTrue(allocatedValue > 0, "Strategy should have allocated value after allocation");
+        console2.log("    [OK] Allocation verified - machine received:", depositAmount, "totalAllocatedValue:", allocatedValue);
+
+        // ── 4. Deallocate back from the Makina strategy ──
+        IERC20 machineShareToken = IERC20(IMachine(machine).shareToken());
+        uint256 strategyShares = machineShareToken.balanceOf(cfg.makinaStrategy);
+
+        IAllocateModule.AllocateParams[] memory deallocParams = new IAllocateModule.AllocateParams[](1);
+        deallocParams[0] = IAllocateModule.AllocateParams({
+            isDeposit: false,
+            strategy: cfg.makinaStrategy,
+            extraData: abi.encode(strategyShares, uint256(0)) // sharesToRedeem, minAssetsOut
+        });
+
+        vm.prank(allocator);
+        IConcreteStandardVaultImpl(cfg.vault).allocate(abi.encode(deallocParams));
+
+        assertEq(strategy.totalAllocatedValue(), 0, "Strategy should have 0 allocated value after deallocation");
+        console2.log("    [OK] Deallocation verified - round-trip complete");
+
+        // ── 5. Restore original depositor/redeemer ──
+        vm.store(machine, depositorSlot, bytes32(uint256(uint160(originalDepositor))));
+        vm.store(machine, redeemerSlot, bytes32(uint256(uint160(originalRedeemer))));
     }
 
     // ═════════════════════════════════════════════════════════════════
