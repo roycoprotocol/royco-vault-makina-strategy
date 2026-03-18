@@ -54,9 +54,9 @@ contract VaultMigrationSimulation is Test {
 
     // ── New Makina Strategy Addresses (pre-deployed) ─────────────────
 
-    address constant DSV_MAKINA_STRATEGY = 0x080184cD22fef5A205E4754B602ACbe6621A383D;
-    address constant ROYWSTETH_MAKINA_STRATEGY = 0x88F20214075D5a4B53084af00AB3330019417a8b;
-    address constant SROYWSTETH_MAKINA_STRATEGY = 0x804690836349e7ce5630C69c2C623916631f7307;
+    address constant DSV_MAKINA_STRATEGY = 0xc5FeF644d59415cec65049e0653CA10eD9Cba778;
+    address constant ROYWSTETH_MAKINA_STRATEGY = 0x185313DBb1f3AA2b3fCc603f0EE4cbA753Ef1DD7;
+    address constant SROYWSTETH_MAKINA_STRATEGY = 0x43c30666baB795Bf567A142e9dD67c59083B86D2;
 
     // ── Whitelisting Hook Addresses ──────────────────────────────────
 
@@ -190,7 +190,7 @@ contract VaultMigrationSimulation is Test {
     // ═════════════════════════════════════════════════════════════════
 
     function test_migration() public {
-        vm.createSelectFork(vm.envString("MAINNET_RPC_URL"), 24_680_567);
+        vm.createSelectFork(vm.envString("MAINNET_RPC_URL"), 24_685_811);
         VaultConfig[3] memory configs = [
             VaultConfig({ vault: DSV_VAULT, multisigStrategy: DSV_MULTISIG_STRATEGY, makinaStrategy: DSV_MAKINA_STRATEGY, whitelistHook: DSV_WHITELIST_HOOK }),
             VaultConfig({

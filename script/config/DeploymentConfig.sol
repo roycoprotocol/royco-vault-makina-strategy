@@ -19,7 +19,7 @@ abstract contract DeploymentConfig {
     string internal constant ROYCO_STAKED_WSTETH = "SROYWSTETH";
 
     /// @notice Royco Factory address - deployed using CREATE2, consistent across all chains
-    address internal constant ROYCO_FACTORY_ADDRESS = 0xD567cCbb336Eb71eC2537057E2bCF6DB840bB71d;
+    address internal constant ROYCO_FACTORY_ADDRESS = 0x7cC6fB28eC7b5e7afC3cB3986141797ffc27253C;
 
     /**
      * @notice Configuration parameters for deploying a strategy
