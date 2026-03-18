@@ -18,10 +18,16 @@ import { IERC20Metadata } from "lib/openzeppelin-contracts/contracts/token/ERC20
 
 import { RoycoVaultMakinaStrategy } from "src/RoycoVaultMakinaStrategy.sol";
 
+interface IWhitelistHook {
+    function whitelistUsers(address[] memory users) external;
+    function isWhitelisted(address user) external view returns (bool);
+    function setVaultDepositCap(address _vault, uint256 _depositCap) external;
+}
+
 /// @title VaultMigrationSimulation
 /// @notice Simulates the full migration of 3 ConcreteAsyncVaults: role migration, strategy swap, and verification.
 ///         Records all transactions per-safe into queues and writes them to JSON files.
-/// @dev Run with: forge test --match-contract VaultMigrationSimulation -vvv
+/// @dev Run with: forge test --match-test test_migration -vvv
 contract VaultMigrationSimulation is Test {
     // ═════════════════════════════════════════════════════════════════
     //                       CONFIGURATION
@@ -81,6 +87,11 @@ contract VaultMigrationSimulation is Test {
     // ── Hook Ownership Config ────────────────────────────────────────
 
     address constant NEW_HOOK_OWNER = FNDNv2;
+
+    // ── Test Depositor ───────────────────────────────────────────────
+
+    /// @dev Address to whitelist on roywstETH/sroywstETH hooks and use for deposit tests
+    address constant TEST_DEPOSITOR = 0x77777Cc68b333a2256B436D675E8D257699Aa667;
 
     // ═════════════════════════════════════════════════════════════════
     //                          TYPES
@@ -157,14 +168,6 @@ contract VaultMigrationSimulation is Test {
         [RoycoVaultMakinaStrategy.rescueToken.selector, RoycoVaultMakinaStrategy.pause.selector, RoycoVaultMakinaStrategy.unpause.selector];
 
     // ═════════════════════════════════════════════════════════════════
-    //                         SETUP
-    // ═════════════════════════════════════════════════════════════════
-
-    function setUp() public {
-        vm.createSelectFork(vm.envString("MAINNET_RPC_URL"), 24_680_567);
-    }
-
-    // ═════════════════════════════════════════════════════════════════
     //                   TX QUEUE HELPERS
     // ═════════════════════════════════════════════════════════════════
 
@@ -186,7 +189,8 @@ contract VaultMigrationSimulation is Test {
     //                      MAIN ENTRY POINT
     // ═════════════════════════════════════════════════════════════════
 
-    function run() public {
+    function test_migration() public {
+        vm.createSelectFork(vm.envString("MAINNET_RPC_URL"), 24_680_567);
         VaultConfig[3] memory configs = [
             VaultConfig({ vault: DSV_VAULT, multisigStrategy: DSV_MULTISIG_STRATEGY, makinaStrategy: DSV_MAKINA_STRATEGY, whitelistHook: DSV_WHITELIST_HOOK }),
             VaultConfig({
@@ -224,6 +228,7 @@ contract VaultMigrationSimulation is Test {
             } else {
                 _migrateAndReplaceStrategy(cfg);
                 _migrateVaultRoles(cfg.vault, false);
+                _whitelistTestDepositor(cfg.whitelistHook, cfg.vault);
             }
 
             // Hook ownership transfer
@@ -389,7 +394,24 @@ contract VaultMigrationSimulation is Test {
     }
 
     // ═════════════════════════════════════════════════════════════════
-    //                 STEP 4: HOOK OWNERSHIP TRANSFER
+    //         STEP 4: WHITELIST TEST DEPOSITOR (roywstETH/sroywstETH)
+    // ═════════════════════════════════════════════════════════════════
+
+    function _whitelistTestDepositor(address hook, address vault) internal {
+        if (hook == address(0)) return;
+
+        if (!IWhitelistHook(hook).isWhitelisted(TEST_DEPOSITOR)) {
+            address[] memory users = new address[](1);
+            users[0] = TEST_DEPOSITOR;
+            _callFromFNDNv1(hook, 0, abi.encodeCall(IWhitelistHook.whitelistUsers, (users)));
+        }
+
+        // Set vault deposit cap to unlimited
+        _callFromFNDNv1(hook, 0, abi.encodeCall(IWhitelistHook.setVaultDepositCap, (vault, type(uint256).max)));
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    //                 STEP 5: HOOK OWNERSHIP TRANSFER
     // ═════════════════════════════════════════════════════════════════
 
     function _migrateHookOwnership(address hook) internal {
@@ -410,6 +432,7 @@ contract VaultMigrationSimulation is Test {
         _verifyStrategyState(cfg, snap, isDSV);
         _verifyMakinaStrategySanity(cfg);
         _verifyAccessManagerConfig(cfg.makinaStrategy);
+        _verifyDeposit(cfg.vault);
     }
 
     function _verifyStateInvariants(VaultConfig memory cfg, VaultSnapshot memory snap) internal view {
@@ -546,6 +569,25 @@ contract VaultMigrationSimulation is Test {
             assertFalse(allowed, string.concat("Random address authorized for selector index ", vm.toString(i)));
         }
         console2.log("    [OK] AccessManager config verified");
+    }
+
+    function _verifyDeposit(address vault) internal {
+        IERC4626 erc4626 = IERC4626(vault);
+        address asset = erc4626.asset();
+        uint8 decimals = IERC20Metadata(asset).decimals();
+        uint256 depositAmount = 10 ** decimals; // 1 token
+
+        // Deal 1 token to the test depositor
+        deal(asset, TEST_DEPOSITOR, depositAmount);
+
+        // Deposit
+        vm.startPrank(TEST_DEPOSITOR);
+        IERC20(asset).approve(vault, depositAmount);
+        uint256 shares = erc4626.deposit(depositAmount, TEST_DEPOSITOR);
+        vm.stopPrank();
+
+        assertTrue(shares > 0, "Deposit returned 0 shares");
+        console2.log("    [OK] Deposit verified - shares received:", shares);
     }
 
     // ═════════════════════════════════════════════════════════════════
