@@ -1249,7 +1249,6 @@ abstract contract StrategyTest is TestBase {
         assertTrue(handler.checkWithdrawBounds(), "onWithdraw must return within bounds");
     }
 
-
     // =========================================
     // INTERNAL HELPERS
     // =========================================

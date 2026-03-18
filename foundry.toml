@@ -49,9 +49,5 @@ runs = 64
 depth = 32
 fail_on_revert = false
 
-[rpc_storage_caching]
-chains = "all"
-endpoints = "all"
-
 [etherscan]
 mainnet = { key = "${ETHERSCAN_API_KEY}" }
