@@ -13,18 +13,13 @@ abstract contract DeploymentConfig {
     /// @notice Chain ID for Ethereum Mainnet
     uint256 internal constant MAINNET = 1;
 
-    /// @notice Strategy name identifier for the Royco Dawn Senior Vault
+    /// @notice Strategy name identifier for the Vaults
     string internal constant ROYCO_DAWN_SENIOR_VAULT = "DSV";
+    string internal constant ROYCO_ETH = "ROYWSTETH";
+    string internal constant ROYCO_STAKED_WSTETH = "SROYWSTETH";
 
-    // TODO: Update with new Royco Dawn factory address
     /// @notice Royco Factory address - deployed using CREATE2, consistent across all chains
-    address internal constant ROYCO_FACTORY_ADDRESS = 0xD567cCbb336Eb71eC2537057E2bCF6DB840bB71d;
-
-    /// @notice Address of the Royco Dawn Senior Vault on Mainnet
-    address internal constant DSV = 0xcD9f5907F92818bC06c9Ad70217f089E190d2a32;
-
-    /// @notice Address of the DUSD Makina Machine on Mainnet
-    address internal constant DUSD_MAKINA_MACHINE = 0x6b006870C83b1Cd49E766Ac9209f8d68763Df721;
+    address internal constant ROYCO_FACTORY_ADDRESS = 0x7cC6fB28eC7b5e7afC3cB3986141797ffc27253C;
 
     /**
      * @notice Configuration parameters for deploying a strategy
@@ -56,9 +51,25 @@ abstract contract DeploymentConfig {
      * @dev Add new strategy configurations here when deploying new strategies
      */
     function _initializeStrategyConfigs() internal {
-        // TODO: Update with new Makina machine when deployed
         _strategyConfigs[ROYCO_DAWN_SENIOR_VAULT] = StrategyDeploymentConfig({
-            roycoFactory: ROYCO_FACTORY_ADDRESS, roycoVault: DSV, makinaMachine: DUSD_MAKINA_MACHINE, strategyType: StrategyType.CROSSCHAIN
+            roycoFactory: ROYCO_FACTORY_ADDRESS,
+            roycoVault: 0xcD9f5907F92818bC06c9Ad70217f089E190d2a32,
+            makinaMachine: 0xFa097420f0e2C72456B361a1eD85172B9ccd8c38,
+            strategyType: StrategyType.CROSSCHAIN
+        });
+
+        _strategyConfigs[ROYCO_ETH] = StrategyDeploymentConfig({
+            roycoFactory: ROYCO_FACTORY_ADDRESS,
+            roycoVault: 0x41Ce72E04D349Eb957bdc373baA9c69207032c56,
+            makinaMachine: 0x0FDF9F1920e160ea8Ae267BdE13e725DeF81E5Ee,
+            strategyType: StrategyType.CROSSCHAIN
+        });
+
+        _strategyConfigs[ROYCO_STAKED_WSTETH] = StrategyDeploymentConfig({
+            roycoFactory: ROYCO_FACTORY_ADDRESS,
+            roycoVault: 0xc678159179EEA877608df50c26C048551a3B6a90,
+            makinaMachine: 0x6BE5ea969E18BF4c9DE0A00EC4F226055f46aA7D,
+            strategyType: StrategyType.CROSSCHAIN
         });
     }
 }
