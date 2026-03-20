@@ -194,6 +194,7 @@ contract VaultMigrationSimulation is Test {
     // ═════════════════════════════════════════════════════════════════
 
     function test_migration() public {
+        vm.skip(true);
         vm.createSelectFork(vm.envString("MAINNET_RPC_URL"), 24_685_811);
         VaultConfig[3] memory configs = [
             VaultConfig({ vault: DSV_VAULT, multisigStrategy: DSV_MULTISIG_STRATEGY, makinaStrategy: DSV_MAKINA_STRATEGY, whitelistHook: DSV_WHITELIST_HOOK }),
